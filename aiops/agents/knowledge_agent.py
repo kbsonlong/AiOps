@@ -7,8 +7,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnableSerializable
 
-from knowledge.retriever import KnowledgeRetriever
-from knowledge.vector_store import VectorStoreManager
+from aiops.knowledge.retriever import KnowledgeRetriever
+from aiops.knowledge.vector_store import VectorStoreManager
 from aiops.agents.base_agent import BaseAgent
 
 
@@ -82,9 +82,9 @@ class StrictAnswerValidator:
         return "YES" in result.strip().upper()
 
 
-class CustomerServiceAgent:
+class KnowledgeAgent:
     """
-    Customer Service Agent that answers questions based on a knowledge base.
+    Knowledge Agent that answers questions based on a knowledge base.
     """
     
     def __init__(self, vector_store_manager: VectorStoreManager):
@@ -118,7 +118,7 @@ class CustomerServiceAgent:
         Get the system prompt for the agent.
         """
         return (
-            "You are a helpful and strict Customer Service Agent. "
+            "You are a helpful and strict Knowledge Base Agent. "
             "Your goal is to answer user questions based ONLY on the provided knowledge base context. "
             "You must use the `query_knowledge_base` tool to find information. "
             "If the information is not in the knowledge base, you must say 'I don't know' or '我不清楚'. "
@@ -135,7 +135,7 @@ class CustomerServiceAgent:
             self.validator.llm = llm
         
         base_agent = BaseAgent(
-            name="customer_service",
+            name="knowledge_base",
             system_prompt=self.get_system_prompt(),
             tools=self.get_tools()
         )

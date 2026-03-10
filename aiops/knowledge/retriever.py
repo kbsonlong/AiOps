@@ -1,7 +1,7 @@
 from typing import List, Optional, Any
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
-from knowledge.vector_store import VectorStoreManager
+from aiops.knowledge.vector_store import VectorStoreManager
 
 class KnowledgeRetriever:
     """

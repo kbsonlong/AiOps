@@ -18,8 +18,8 @@ from aiops.agents import (
     build_metrics_agent,
     build_security_agent,
 )
-from aiops.agents.customer_service import CustomerServiceAgent
-from knowledge.vector_store import VectorStoreManager
+from aiops.agents.knowledge_agent import KnowledgeAgent
+from aiops.knowledge.vector_store import VectorStoreManager
 from aiops.skills import SkillCompositionEngine, SkillDiscoveryService, SkillRegistry
 from aiops.skills_lib import (
     FAULT_DIAGNOSIS_SKILLS,
@@ -30,7 +30,7 @@ from aiops.skills_lib import (
 
 
 Severity = Literal["low", "medium", "high", "critical"]
-Source = Literal["metrics", "logs", "fault", "security", "customer_service"]
+Source = Literal["metrics", "logs", "fault", "security", "knowledge_base"]
 
 
 class AgentInput(TypedDict):
@@ -56,7 +56,7 @@ class RouterState(TypedDict):
     detected_skills: list[dict]
     skill_execution_plan: dict
     knowledge_context: Optional[str]
-    customer_service_result: Optional[str]
+    knowledge_base_result: Optional[str]
 
 
 class ClassificationResult(BaseModel):
@@ -120,10 +120,10 @@ def classify_query(state: RouterState, router_llm) -> dict:
                 "role": "system",
                 "content": (
                     "Analyze the query and decide which AIOps agents to call. "
-                    "Available sources: metrics, logs, fault, security, customer_service. "
+                    "Available sources: metrics, logs, fault, security, knowledge_base. "
                     "For each, produce a focused sub-query and a severity: low, medium, high, critical. "
                     "Return only relevant sources. "
-                    "Use 'customer_service' for queries about 'how-to', 'what is', 'policy', or general knowledge."
+                    "Use 'knowledge_base' for queries about 'how-to', 'what is', 'policy', or general knowledge."
                 ),
             },
             {"role": "user", "content": query_text},
@@ -231,16 +231,42 @@ def query_security(state: AgentInput, security_agent) -> dict:
     return {"results": [{"source": "security", "result": result["messages"][-1].content}]}
 
 
-def customer_service_node(state: AgentInput, customer_service_agent) -> dict:
+def knowledge_base_node(state: AgentInput, knowledge_agent, vector_store, llm) -> dict:
     """
-    执行节点：调用客户服务代理 (RAG) 回答一般性问题。
+    执行节点：调用知识库代理 (RAG) 回答一般性问题。
+    使用显式 RAG 流程，避免依赖小模型的工具调用能力。
     """
     query_text = _normalize_query(state.get("query"))
-    result = customer_service_agent.invoke({"messages": [{"role": "user", "content": query_text}]})
-    answer = result["messages"][-1].content
+    
+    # 1. 检索
+    docs = vector_store.similarity_search(query_text, k=3)
+    context = "\n\n".join([f"Document {i+1}:\n{doc.page_content}" for i, doc in enumerate(docs)])
+    
+    if not docs:
+        context = "No relevant documents found."
+    
+    # 2. 生成
+    system_prompt = (
+        "You are a helpful and strict Knowledge Base Agent. "
+        "Your goal is to answer user questions based ONLY on the provided knowledge base context. "
+        "If the information is not in the knowledge base, you must say 'I don't know' or '我不清楚'. "
+        "Do NOT make up answers (hallucinate). "
+        "Do NOT use outside knowledge. "
+        "Keep your answers concise and polite."
+    )
+    
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query_text}"}
+    ]
+    
+    response = llm.invoke(messages)
+    answer = response.content
+    
     return {
-        "results": [{"source": "customer_service", "result": answer}],
-        "customer_service_result": answer
+        "results": [{"source": "knowledge_base", "result": answer}],
+        "knowledge_base_result": answer,
+        "knowledge_context": context
     }
 
 
@@ -266,7 +292,7 @@ def synthesize_results(state: RouterState, router_llm) -> dict:
             "content": (
                 f"Synthesize these results to answer the original question: \"{query_text}\". "
                 "Combine findings, highlight anomalies, and provide actionable next steps. "
-                "If there is a 'customer_service' result, ensure it is the primary source for 'how-to' or general knowledge questions."
+                "If there is a 'knowledge_base' result, ensure it is the primary source for 'how-to' or general knowledge questions."
             ),
         },
         {"role": "user", "content": "\n\n".join(formatted)},
@@ -312,7 +338,7 @@ def build_workflow(llm, router_llm):
     security_agent = build_security_agent().build(llm)
     
     vector_store = VectorStoreManager()
-    customer_service_agent = CustomerServiceAgent(vector_store).build(llm)
+    knowledge_agent = KnowledgeAgent(vector_store).build(llm)
 
     graph = (
         StateGraph(RouterState)
@@ -322,16 +348,16 @@ def build_workflow(llm, router_llm):
         .add_node("logs", lambda state: query_logs(state, logs_agent))
         .add_node("fault", lambda state: query_fault(state, fault_agent))
         .add_node("security", lambda state: query_security(state, security_agent))
-        .add_node("customer_service", lambda state: customer_service_node(state, customer_service_agent))
+        .add_node("knowledge_base", lambda state: knowledge_base_node(state, knowledge_agent, vector_store, llm))
         .add_node("synthesize", lambda state: synthesize_results(state, router_llm))
         .add_edge(START, "classify")
-        .add_conditional_edges("classify", route_to_agents, ["metrics", "logs", "fault", "security", "customer_service"])
+        .add_conditional_edges("classify", route_to_agents, ["metrics", "logs", "fault", "security", "knowledge_base"])
         .add_edge("classify", "skill_orchestrate")
         .add_edge("metrics", "synthesize")
         .add_edge("logs", "synthesize")
         .add_edge("fault", "synthesize")
         .add_edge("security", "synthesize")
-        .add_edge("customer_service", "synthesize")
+        .add_edge("knowledge_base", "synthesize")
         .add_edge("skill_orchestrate", "synthesize")
         .add_edge("synthesize", END)
     )

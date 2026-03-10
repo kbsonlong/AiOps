@@ -13,8 +13,8 @@ from langchain_community.chat_models import FakeListChatModel
 from langchain.tools import tool as lc_tool
 
 try:
-    from aiops.agents.customer_service import CustomerServiceAgent
-    from knowledge.vector_store import VectorStoreManager
+    from aiops.agents.knowledge_agent import KnowledgeAgent
+    from aiops.knowledge.vector_store import VectorStoreManager
 except ImportError as e:
     print(f"Error importing modules: {e}")
     sys.exit(1)
@@ -29,7 +29,7 @@ def main():
         
     embeddings = FakeEmbeddings(size=10)
     vs_manager = VectorStoreManager(
-        collection_name="customer_service_test",
+        collection_name="knowledge_base_test",
         persist_directory=vs_dir,
         embedding_function=embeddings
     )

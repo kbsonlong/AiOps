@@ -22,7 +22,7 @@
     - [x] SubTask 4.3: 更新 `classify_query` 逻辑，将适当的查询路由至 `customer_service`。
     - [x] SubTask 4.4: 将新节点和边添加到 LangGraph 工作流中。
 
-- [ ] Task 5: 验证与演示
-    - [ ] SubTask 5.1: 创建测试脚本验证知识摄入。
-    - [ ] SubTask 5.2: 创建测试脚本验证检索和回答。
-    - [ ] SubTask 5.3: 运行完整工作流，测试示例查询（例如，“如何修复 CPU 高负载？”）。
+- [x] Task 5: 验证与演示
+    - [x] SubTask 5.1: 创建测试脚本验证知识摄入。
+    - [x] SubTask 5.2: 创建测试脚本验证检索和回答。
+    - [x] SubTask 5.3: 运行完整工作流，测试示例查询（例如，“如何修复 CPU 高负载？”）。

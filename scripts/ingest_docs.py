@@ -1,5 +1,6 @@
 import os
 import sys
+import glob
 from dotenv import load_dotenv
 
 # Add project root to sys.path
@@ -13,34 +14,55 @@ def main():
     load_dotenv()
     
     # Configuration
-    data_file = "data/sample_knowledge.md"
+    docs_dir = "docs"
     persist_directory = "./chroma_db"
     
-    # Check if data file exists
-    if not os.path.exists(data_file):
-        print(f"Error: Data file '{data_file}' not found.")
+    # Check if docs directory exists
+    if not os.path.exists(docs_dir):
+        print(f"Error: Docs directory '{docs_dir}' not found.")
         return
 
-    print(f"--- Starting Ingestion Process ---")
+    print(f"--- Starting Bulk Ingestion Process ---")
     
-    # 1. Process Document
-    print(f"Processing {data_file}...")
+    # 1. Collect all markdown files
+    md_files = glob.glob(os.path.join(docs_dir, "**/*.md"), recursive=True)
+    if not md_files:
+        print(f"No markdown files found in '{docs_dir}'.")
+        return
+        
+    print(f"Found {len(md_files)} markdown files in '{docs_dir}'.")
+    
+    # 2. Process Documents
     processor = DocumentProcessor()
-    try:
-        docs = processor.process_file(data_file)
-        print(f"Successfully loaded and split into {len(docs)} chunks.")
-    except Exception as e:
-        print(f"Error processing file: {e}")
+    all_docs = []
+    
+    for file_path in md_files:
+        print(f"Processing {file_path}...")
+        try:
+            docs = processor.process_file(file_path)
+            # Add metadata about source
+            for doc in docs:
+                doc.metadata["source"] = file_path
+                doc.metadata["filename"] = os.path.basename(file_path)
+            all_docs.extend(docs)
+        except Exception as e:
+            print(f"Error processing file {file_path}: {e}")
+            continue
+
+    print(f"Successfully processed {len(all_docs)} total document chunks.")
+    
+    if not all_docs:
+        print("No documents to ingest.")
         return
 
-    # 2. Initialize Vector Store
+    # 3. Initialize Vector Store and Add Documents
     print("Initializing Vector Store...")
     try:
+        # Try with default configuration (LiteLLM) first
         vector_store = VectorStoreManager(persist_directory=persist_directory)
         
-        # 3. Add Documents
-        print("Adding documents to Vector Store...")
-        ids = vector_store.add_documents(docs)
+        print(f"Adding {len(all_docs)} documents to Vector Store...")
+        ids = vector_store.add_documents(all_docs)
         print(f"Successfully added {len(ids)} documents to vector store at '{persist_directory}'.")
         
     except Exception as e:
@@ -48,7 +70,7 @@ def main():
         print("Attempting to use local HuggingFace embeddings as fallback...")
         
         try:
-            from langchain_community.embeddings import HuggingFaceEmbeddings
+            from langchain_huggingface import HuggingFaceEmbeddings
             # Use a small, fast model
             hf_embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
             
@@ -58,10 +80,11 @@ def main():
             vector_store = VectorStoreManager(
                 persist_directory=fallback_persist_directory,
                 collection_name="knowledge_base_local",
-                # embedding_function=hf_embeddings
+                embedding_function=hf_embeddings
             )
             
-            ids = vector_store.add_documents(docs)
+            print(f"Adding {len(all_docs)} documents to Local Vector Store...")
+            ids = vector_store.add_documents(all_docs)
             print(f"Successfully added {len(ids)} documents to vector store at '{fallback_persist_directory}' using local embeddings.")
             
             # Create a marker file to indicate fallback was used
@@ -69,7 +92,7 @@ def main():
                 f.write("true")
                 
         except ImportError:
-            print("langchain_community or sentence-transformers not installed. Cannot use fallback.")
+            print("langchain_huggingface or sentence-transformers not installed. Cannot use fallback.")
         except Exception as e2:
             print(f"Fallback failed: {e2}")
 

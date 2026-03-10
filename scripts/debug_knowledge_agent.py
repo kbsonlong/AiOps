@@ -1,10 +1,12 @@
 
 import os
-from aiops.agents.customer_service import CustomerServiceAgent
-from knowledge.vector_store import VectorStoreManager
+from dotenv import load_dotenv
+from aiops.agents.knowledge_agent import KnowledgeAgent
+from aiops.knowledge.vector_store import VectorStoreManager
 from langchain_litellm import ChatLiteLLM
 
 def main():
+    load_dotenv()
     print("Initializing VectorStoreManager...")
     vs = VectorStoreManager()
     print("VectorStoreManager initialized.")
@@ -15,9 +17,15 @@ def main():
     for i, doc in enumerate(docs):
         print(f"Doc {i}: {doc.page_content[:100]}...")
 
-    print("\nInitializing CustomerServiceAgent...")
-    llm = ChatLiteLLM(model=os.getenv("LLM_MODEL"), api_key="ollama", api_base="http://localhost:11434")
-    agent = CustomerServiceAgent(vs).build(llm)
+    print("\nInitializing KnowledgeAgent...")
+    llm_model = os.getenv("LLM_MODEL")
+    api_key = os.getenv("LITELLM_API_KEY")
+    api_base = os.getenv("LITELLM_API_BASE")
+    # api_base is handled by LiteLLM via LITELLM_API_BASE env var for openai/* models
+    # But explicitly passing it is safer if we read it from env
+    llm = ChatLiteLLM(model=llm_model, api_key=api_key, api_base=api_base)
+    
+    agent = KnowledgeAgent(vs).build(llm)
     
     print("Invoking agent...")
     result = agent.invoke({"messages": [{"role": "user", "content": "What is the AiOps system?"}]})
