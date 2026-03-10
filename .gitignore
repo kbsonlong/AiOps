@@ -11,3 +11,7 @@ wheels/
 .langgraph_api/
 .env
 uv.lock
+chroma_db/
+chroma_db_local/
+data/
+.use_local_embeddings
