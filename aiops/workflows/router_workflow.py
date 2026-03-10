@@ -3,7 +3,9 @@ from __future__ import annotations
 import operator
 from typing import Annotated, Literal, TypedDict
 
-from langchain.chat_models import init_chat_model
+from langchain_litellm import ChatLiteLLM
+from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.prompts import PromptTemplate
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 from pydantic import BaseModel, Field
@@ -58,20 +60,49 @@ class ClassificationResult(BaseModel):
 
 
 def classify_query(state: RouterState, router_llm) -> dict:
-    structured_llm = router_llm.with_structured_output(ClassificationResult)
-    result = structured_llm.invoke([
-        {
-            "role": "system",
-            "content": (
-                "Analyze the query and decide which AIOps agents to call. "
-                "Available sources: metrics, logs, fault, security. "
-                "For each, produce a focused sub-query and a severity: low, medium, high, critical. "
-                "Return only relevant sources."
-            ),
-        },
-        {"role": "user", "content": state["query"]},
-    ])
-    return {"classifications": result.classifications}
+    try:
+        structured_llm = router_llm.with_structured_output(ClassificationResult)
+        result = structured_llm.invoke([
+            {
+                "role": "system",
+                "content": (
+                    "Analyze the query and decide which AIOps agents to call. "
+                    "Available sources: metrics, logs, fault, security. "
+                    "For each, produce a focused sub-query and a severity: low, medium, high, critical. "
+                    "Return only relevant sources."
+                ),
+            },
+            {"role": "user", "content": state["query"]},
+        ])
+        if result is not None:
+            return {"classifications": result.classifications}
+    except Exception as e:
+        # Silently fail or log warning if needed, but for user experience we just fallback
+        pass
+
+    # Fallback: Manual JSON prompting with forced JSON mode
+    try:
+        parser = JsonOutputParser(pydantic_object=ClassificationResult)
+        prompt = PromptTemplate(
+            template="You are a helpful AIOps assistant.\nAnalyze the query and decide which agents to call.\nReturn ONLY a valid JSON object matching the schema below.\nDo NOT include any markdown formatting (like ```json), explanations, or extra text.\n\nSchema:\n{format_instructions}\n\nQuery: {query}\n\nJSON Response:",
+            input_variables=["query"],
+            partial_variables={"format_instructions": parser.get_format_instructions()},
+        )
+        
+        # Note: Removing bind(response_format) as it caused empty output with some Ollama models
+        chain = prompt | router_llm | parser
+        result = chain.invoke({"query": state["query"]})
+        
+        # Validate result
+        if isinstance(result, dict):
+            # Try to validate with Pydantic model
+            obj = ClassificationResult.model_validate(result)
+            return {"classifications": obj.classifications}
+    except Exception as e:
+        print(f"Error: JSON fallback also failed. {e}")
+        
+    # Return empty classifications if all fails
+    return {"classifications": []}
 
 
 def _ensure_critical_agents(
@@ -184,7 +215,26 @@ def build_workflow(llm, router_llm):
     return graph.compile()
 
 
+import os
+
 def build_default_workflow():
-    llm = init_chat_model("openai:gpt-4.1")
-    router_llm = init_chat_model("openai:gpt-4.1-mini")
+    """
+    Build the default workflow using LiteLLM for multi-provider support.
+    
+    You can switch providers by changing the model name, e.g.:
+    - OpenAI: "gpt-4o", "gpt-4o-mini"
+    - Anthropic: "claude-3-opus-20240229"
+    - Ollama: "ollama/llama3"
+    - Azure: "azure/gpt-4"
+    """
+    # Main LLM for complex tasks (synthesis, agent execution)
+    llm_model = os.getenv("LLM_MODEL", "gpt-4o")
+    llm_key = os.getenv("LITELLM_API_KEY","")
+    llm_base = os.getenv("LITELLM_API_BASE","")
+    llm = ChatLiteLLM(model=llm_model, temperature=0, timeout=30, api_key=llm_key, api_base=llm_base)
+    
+    # Router LLM for classification (faster, cheaper)
+    router_llm_model = os.getenv("ROUTER_LLM_MODEL", "gpt-4o-mini")
+    router_llm = ChatLiteLLM(model=router_llm_model, temperature=0, timeout=30, api_key=llm_key, api_base=llm_base)
+    
     return build_workflow(llm, router_llm)

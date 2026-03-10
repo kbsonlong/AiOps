@@ -5,6 +5,10 @@ AIOps Router Workflow Entry.
 from __future__ import annotations
 
 import argparse
+import os
+
+from dotenv import load_dotenv
+load_dotenv()
 
 from aiops.notifications import format_report
 from aiops.workflows import build_default_workflow

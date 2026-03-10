@@ -7,6 +7,16 @@ from typing import Dict, Iterable, List
 from urllib.parse import urlencode, urljoin
 from urllib.request import Request, urlopen
 
+from aiops.config.settings import load_settings
+
+
+def _get_default_vl_url() -> str:
+    return load_settings().logs.victorialogs_base_url
+
+
+def _get_default_otel_url() -> str:
+    return load_settings().logs.otel_logs_query_url
+
 
 def _candidate_log_files(log_type: str) -> List[Path]:
     if Path(log_type).exists():
@@ -142,17 +152,19 @@ def _http_get_json(url: str, timeout: float = 5.0) -> Dict[str, object]:
         return {"status": "error", "error": "invalid_json", "raw": payload}
 
 
-def query_victorialogs(query: str, base_url: str, limit: int = 100, timeout: float = 5.0) -> Dict[str, object]:
+def query_victorialogs(query: str, base_url: str | None = None, limit: int = 100, timeout: float = 5.0) -> Dict[str, object]:
     """Query VictoriaLogs using LogSQL query API."""
+    url_base = base_url or _get_default_vl_url()
     params = {"query": query, "limit": limit}
-    url = urljoin(base_url.rstrip("/") + "/", "select/logsql/query")
+    url = urljoin(url_base.rstrip("/") + "/", "select/logsql/query")
     url = f"{url}?{urlencode(params)}"
     return _http_get_json(url, timeout=timeout)
 
 
-def query_otel_logs(query: str, query_url: str, limit: int = 100, timeout: float = 5.0) -> Dict[str, object]:
+def query_otel_logs(query: str, query_url: str | None = None, limit: int = 100, timeout: float = 5.0) -> Dict[str, object]:
     """Query logs via an OTel log backend gateway with HTTP query API."""
+    url_base = query_url or _get_default_otel_url()
     params = {"query": query, "limit": limit}
-    url = query_url.rstrip("/") + "/api/v1/logs"
+    url = url_base.rstrip("/") + "/api/v1/logs"
     url = f"{url}?{urlencode(params)}"
     return _http_get_json(url, timeout=timeout)

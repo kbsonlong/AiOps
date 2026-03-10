@@ -18,7 +18,7 @@ services:
     restart: unless-stopped
 
   victorialogs:
-    image: victoriametrics/victoria-logs:v0.18.0
+    image: victoriametrics/victoria-logs:v1.47.0
     ports:
       - "9428:9428"
     restart: unless-stopped
@@ -57,33 +57,6 @@ services:
     command: redis-server --appendonly yes
     restart: unless-stopped
 
-  # AIOps应用 - 生产构建
-  aiops-app:
-    build: .
-    ports:
-      - "8080:8000"
-    environment:
-      - PROMETHEUS_URL=http://prometheus:9090
-      - VICTORIALOGS_URL=http://victorialogs:9428
-      - OTEL_COLLECTOR_URL=http://otel-collector:4318
-      - CHROMADB_URL=http://chromadb:8000
-      - REDIS_URL=redis://redis:6379/0
-      - PYTHONUNBUFFERED=1
-    depends_on:
-      - prometheus
-      - victorialogs
-      - otel-collector
-      - chromadb
-      - redis
-    volumes:
-      # 挂载代码目录用于开发（生产环境可移除）
-      - ./aiops:/app/aiops
-      - ./main.py:/app/main.py
-      - ./pyproject.toml:/app/pyproject.toml
-      - ./uv.lock:/app/uv.lock
-    restart: unless-stopped
-    command: ["uv", "run", "python", "main.py"]
-
   # AIOps应用 - 开发模式（热重载）
   aiops-dev:
     build: .
@@ -97,6 +70,10 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - PYTHONUNBUFFERED=1
       - ENVIRONMENT=development
+      # LLM Configuration for Docker environment
+      - LLM_MODEL=ollama/llama3
+      - ROUTER_LLM_MODEL=ollama/llama3
+      - LITELLM_API_BASE=http://ollama:11434
     depends_on:
       - prometheus
       - victorialogs
@@ -106,6 +83,8 @@ services:
     volumes:
       # 挂载所有代码用于热重载
       - .:/app
+      # 防止主机覆盖容器内的依赖环境
+      - /app/.venv
     restart: unless-stopped
     command: ["uv", "run", "watchfiles", "--filter", "python", "python", "main.py"]
 

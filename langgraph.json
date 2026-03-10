@@ -1,0 +1,9 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "dependencies": ["."],
+  "graphs": {
+    "agent": "aiops/workflows/router_workflow.py:build_default_workflow"
+  },
+  "env": ".env",
+  "image_distro": "wolfi"
+}
