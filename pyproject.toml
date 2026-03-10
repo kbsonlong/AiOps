@@ -1,0 +1,19 @@
+[project]
+name = "aiops"
+version = "0.1.0"
+description = "Production-ready AIOps system with human-in-the-loop approval for monitoring and remediation"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "langchain-ollama>=1.0.1",
+    "langchain[openai]>=1.2.10",
+    "langgraph>=1.0.10",
+    "psutil>=5.9.0",
+    "pydantic>=2.0.0",
+    "schedule>=1.2.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+    "structlog>=24.0.0",
+    "networkx>=3.6.1",
+    "fastapi>=0.135.1",
+]

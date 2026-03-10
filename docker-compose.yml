@@ -1,0 +1,114 @@
+version: "3.9"
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.53.1
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    restart: unless-stopped
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    ports:
+      - "9100:9100"
+    restart: unless-stopped
+
+  victorialogs:
+    image: victoriametrics/victoria-logs:v0.18.0
+    ports:
+      - "9428:9428"
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.102.0
+    ports:
+      - "4318:4318"
+      - "8889:8889"
+    volumes:
+      - ./docker/otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro
+    command:
+      - "--config=/etc/otelcol-contrib/config.yaml"
+    restart: unless-stopped
+
+  # 向量数据库 - 用于知识库存储
+  chromadb:
+    image: chromadb/chroma:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma-data
+      - ANONYMIZED_TELEMETRY=FALSE
+    volumes:
+      - chroma-data:/chroma/chroma-data
+    restart: unless-stopped
+
+  # Redis缓存 - 用于技能执行缓存和会话管理
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+
+  # AIOps应用 - 生产构建
+  aiops-app:
+    build: .
+    ports:
+      - "8080:8000"
+    environment:
+      - PROMETHEUS_URL=http://prometheus:9090
+      - VICTORIALOGS_URL=http://victorialogs:9428
+      - OTEL_COLLECTOR_URL=http://otel-collector:4318
+      - CHROMADB_URL=http://chromadb:8000
+      - REDIS_URL=redis://redis:6379/0
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - prometheus
+      - victorialogs
+      - otel-collector
+      - chromadb
+      - redis
+    volumes:
+      # 挂载代码目录用于开发（生产环境可移除）
+      - ./aiops:/app/aiops
+      - ./main.py:/app/main.py
+      - ./pyproject.toml:/app/pyproject.toml
+      - ./uv.lock:/app/uv.lock
+    restart: unless-stopped
+    command: ["uv", "run", "python", "main.py"]
+
+  # AIOps应用 - 开发模式（热重载）
+  aiops-dev:
+    build: .
+    ports:
+      - "8081:8000"
+    environment:
+      - PROMETHEUS_URL=http://prometheus:9090
+      - VICTORIALOGS_URL=http://victorialogs:9428
+      - OTEL_COLLECTOR_URL=http://otel-collector:4318
+      - CHROMADB_URL=http://chromadb:8000
+      - REDIS_URL=redis://redis:6379/0
+      - PYTHONUNBUFFERED=1
+      - ENVIRONMENT=development
+    depends_on:
+      - prometheus
+      - victorialogs
+      - otel-collector
+      - chromadb
+      - redis
+    volumes:
+      # 挂载所有代码用于热重载
+      - .:/app
+    restart: unless-stopped
+    command: ["uv", "run", "watchfiles", "--filter", "python", "python", "main.py"]
+
+volumes:
+  chroma-data:
+  redis-data:

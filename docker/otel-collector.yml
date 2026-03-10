@@ -1,0 +1,20 @@
+receivers:
+  otlp:
+    protocols:
+      http:
+
+processors:
+  batch:
+
+exporters:
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+  logging:
+    loglevel: info
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus, logging]
