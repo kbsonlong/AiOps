@@ -123,7 +123,7 @@ def classify_query(state: RouterState, router_llm) -> dict:
                     "Available sources: metrics, logs, fault, security, knowledge_base. "
                     "For each, produce a focused sub-query and a severity: low, medium, high, critical. "
                     "Return only relevant sources. "
-                    "Use 'knowledge_base' for queries about 'how-to', 'what is', 'policy', or general knowledge."
+                    "Use 'knowledge_base' for queries about 'how-to', 'what is', 'policy', 'introduce', or general knowledge."
                 ),
             },
             {"role": "user", "content": query_text},
@@ -195,40 +195,43 @@ def route_to_agents(state: RouterState) -> list[Send]:
     return [Send(item["source"], {"query": item["query"]}) for item in enriched]
 
 
-def query_metrics(state: AgentInput, metrics_agent) -> dict:
-    """
-    执行节点：调用指标监控代理 (Prometheus/Grafana) 查询系统指标。
-    """
-    query_text = _normalize_query(state.get("query"))
-    result = metrics_agent.invoke({"messages": [{"role": "user", "content": query_text}]})
-    return {"results": [{"source": "metrics", "result": result["messages"][-1].content}]}
+def _safe_extract_content(resp) -> str:
+    try:
+        # 兼容字典结构
+        if isinstance(resp, dict):
+            # 优先检查 messages 字段
+            if "messages" in resp:
+                msgs = resp.get("messages")
+                if not msgs:
+                    return ""
+                last = msgs[-1]
+                # 兼容对象或字典
+                if hasattr(last, "content"):
+                    return _coerce_text(getattr(last, "content"))
+                if isinstance(last, dict):
+                    return _coerce_text(last.get("content"))
+        # 兜底：直接转文本
+        return _coerce_text(resp)
+    except Exception:
+        return ""
 
 
-def query_logs(state: AgentInput, logs_agent) -> dict:
-    """
-    执行节点：调用日志分析代理 (Elasticsearch/Loki) 检索系统日志。
-    """
-    query_text = _normalize_query(state.get("query"))
-    result = logs_agent.invoke({"messages": [{"role": "user", "content": query_text}]})
-    return {"results": [{"source": "logs", "result": result["messages"][-1].content}]}
+def _invoke_agent(agent, query_text: str) -> str:
+    try:
+        payload = {"messages": [{"role": "user", "content": query_text}]}
+        resp = agent.invoke(payload)
+        return _safe_extract_content(resp)
+    except Exception as e:
+        # 统一异常回退文案，可加日志或监控
+        return f"Agent invocation failed: {e}"
 
 
-def query_fault(state: AgentInput, fault_agent) -> dict:
-    """
-    执行节点：调用故障诊断代理进行根因分析。
-    """
-    query_text = _normalize_query(state.get("query"))
-    result = fault_agent.invoke({"messages": [{"role": "user", "content": query_text}]})
-    return {"results": [{"source": "fault", "result": result["messages"][-1].content}]}
-
-
-def query_security(state: AgentInput, security_agent) -> dict:
-    """
-    执行节点：调用安全审计代理检查潜在风险。
-    """
-    query_text = _normalize_query(state.get("query"))
-    result = security_agent.invoke({"messages": [{"role": "user", "content": query_text}]})
-    return {"results": [{"source": "security", "result": result["messages"][-1].content}]}
+def make_query_node(agent, source: Source):
+    def node(state: AgentInput) -> dict:
+        query_text = _normalize_query(state.get("query"))
+        content = _invoke_agent(agent, query_text)
+        return {"results": [{"source": source, "result": content}]}
+    return node
 
 
 def knowledge_base_node(state: AgentInput, knowledge_agent, vector_store, llm) -> dict:
@@ -344,10 +347,10 @@ def build_workflow(llm, router_llm):
         StateGraph(RouterState)
         .add_node("classify", lambda state: classify_query(state, router_llm))
         .add_node("skill_orchestrate", skill_orchestration_node)
-        .add_node("metrics", lambda state: query_metrics(state, metrics_agent))
-        .add_node("logs", lambda state: query_logs(state, logs_agent))
-        .add_node("fault", lambda state: query_fault(state, fault_agent))
-        .add_node("security", lambda state: query_security(state, security_agent))
+        .add_node("metrics", make_query_node(metrics_agent, "metrics"))
+        .add_node("logs", make_query_node(logs_agent, "logs"))
+        .add_node("fault", make_query_node(fault_agent, "fault"))
+        .add_node("security", make_query_node(security_agent, "security"))
         .add_node("knowledge_base", lambda state: knowledge_base_node(state, knowledge_agent, vector_store, llm))
         .add_node("synthesize", lambda state: synthesize_results(state, router_llm))
         .add_edge(START, "classify")
@@ -380,12 +383,13 @@ def build_default_workflow():
     llm_model = os.getenv("LLM_MODEL", "gpt-4o")
     llm_key = os.getenv("LITELLM_API_KEY","")
     llm_base = os.getenv("LITELLM_API_BASE","")
+    print(f"LLM Model: {llm_model}, API Key: {llm_key}, API Base: {llm_base}")
     llm = ChatLiteLLM(model=llm_model, temperature=0, timeout=30, api_key=llm_key, api_base=llm_base, max_tokens=4096)
     
     # Router LLM for classification (faster, cheaper)
     router_llm_model = os.getenv("ROUTER_LLM_MODEL", "gpt-4o-mini")
     router_llm = ChatLiteLLM(model=router_llm_model, temperature=0, timeout=30, api_key=llm_key, api_base=llm_base, max_tokens=4096)
-    
+    print(f"Router LLM Model: {router_llm_model}, API Key: {llm_key}, API Base: {llm_base}")
     return build_workflow(llm, router_llm)
 
 
@@ -407,8 +411,8 @@ async def diagnosis_node(state: RouterState, metrics_agent, logs_agent, fault_ag
         logs_agent.ainvoke({"messages": [{"role": "user", "content": query_text}]})
     )
     
-    metrics_res = results[0]["messages"][-1].content
-    logs_res = results[1]["messages"][-1].content
+    metrics_res = _safe_extract_content(results[0])
+    logs_res = _safe_extract_content(results[1])
     
     # 将上下文传递给故障诊断 Agent
     fault_prompt = (
@@ -423,7 +427,7 @@ async def diagnosis_node(state: RouterState, metrics_agent, logs_agent, fault_ag
         "results": [
             {"source": "metrics", "result": metrics_res},
             {"source": "logs", "result": logs_res},
-            {"source": "fault", "result": fault_res["messages"][-1].content}
+            {"source": "fault", "result": _safe_extract_content(fault_res)}
         ]
     }
 

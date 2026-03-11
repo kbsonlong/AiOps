@@ -38,9 +38,11 @@ class VectorStoreManager:
         else:
             # Ensure API key is available if needed
             if api_base:
-                os.environ["LITELLM_API_BASE"] = api_base
+                os.environ["LITELLM_EMBEDDING_API_BASE"] = api_base
             if api_key:
-                os.environ["LITELLM_API_KEY"] = api_key
+                os.environ["LITELLM_EMBEDDING_API_KEY"] = api_key
+            
+            os.environ["LITELLM_EMBEDDING_MODEL"] = embedding_model
             
             self.embeddings = LiteLLMEmbeddings(
                 model=embedding_model,
