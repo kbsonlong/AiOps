@@ -26,7 +26,7 @@ from aiops.agents.knowledge_agent import KnowledgeAgent
 from aiops.knowledge.vector_store import VectorStoreManager
 from aiops.skills import SkillCompositionEngine, SkillDiscoveryService
 from aiops.skills.global_registry import get_global_skill_registry
-from aiops.workflows.skill_middleware import skill_integration_middleware, skill_solidification_middleware
+from aiops.workflows.skill_middleware import get_skill_post_middleware_chain, get_skill_pre_middleware_chain
 from aiops.core.error_handler import get_logger, log_exception, safe_execute
 from aiops.exceptions import AgentException, ConfigException
 
@@ -397,6 +397,38 @@ def synthesize_results(state: RouterState, router_llm) -> dict:
     return {"final_answer": synthesis_response.content}
 
 
+def make_skill_middleware_pre_node():
+    chain = get_skill_pre_middleware_chain()
+
+    def node(state: RouterState) -> dict:
+        updated = chain.run(state)
+        update: dict = {}
+        if updated.get("query") != state.get("query"):
+            update["query"] = updated.get("query")
+        if updated.get("context") != state.get("context"):
+            update["context"] = updated.get("context", {})
+        return update
+
+    return node
+
+
+def make_synthesize_with_middlewares_node(router_llm):
+    chain = get_skill_post_middleware_chain()
+
+    def terminal(state: RouterState) -> dict:
+        update = synthesize_results(state, router_llm)
+        return {**state, **update}
+
+    def node(state: RouterState) -> dict:
+        final_state = chain.run(state, terminal=terminal)
+        update: dict = {"final_answer": final_state.get("final_answer", "")}
+        if "context" in final_state:
+            update["context"] = final_state.get("context", {})
+        return update
+
+    return node
+
+
 def skill_orchestration_node(state: RouterState) -> dict:
     """
     技能编排节点：基于查询动态发现和规划原子技能的执行顺序。
@@ -415,7 +447,7 @@ def skill_orchestration_node(state: RouterState) -> dict:
     }
 
 
-def build_workflow(llm, router_llm):
+def build_workflow(llm, router_llm, settings=None):
     """
     构建 LangGraph 工作流图。
     
@@ -430,12 +462,12 @@ def build_workflow(llm, router_llm):
     fault_agent = build_fault_agent().build(llm)
     security_agent = build_security_agent().build(llm)
     
-    vector_store = VectorStoreManager()
+    vector_store = VectorStoreManager(settings=settings)
     knowledge_agent = KnowledgeAgent(vector_store).build(llm)
 
     graph = (
         StateGraph(RouterState)
-        .add_node("skill_middleware_pre", skill_integration_middleware)
+        .add_node("skill_middleware_pre", make_skill_middleware_pre_node())
         .add_node("classify", lambda state: classify_query(state, router_llm))
         .add_node("skill_orchestrate", skill_orchestration_node)
         .add_node("metrics", make_query_node(metrics_agent, "metrics"))
@@ -443,8 +475,8 @@ def build_workflow(llm, router_llm):
         .add_node("fault", make_query_node(fault_agent, "fault"))
         .add_node("security", make_query_node(security_agent, "security"))
         .add_node("knowledge_base", lambda state: knowledge_base_node(state, knowledge_agent, vector_store, llm))
-        .add_node("synthesize", lambda state: synthesize_results(state, router_llm))
-        .add_node("skill_middleware_post", lambda state: skill_solidification_middleware(state, state))
+        .add_node("synthesize", make_synthesize_with_middlewares_node(router_llm))
+        .add_node("skill_middleware_post", lambda state: {})
         .add_edge(START, "skill_middleware_pre")
         .add_edge("skill_middleware_pre", "classify")
         .add_conditional_edges("classify", route_to_agents, ["metrics", "logs", "fault", "security", "knowledge_base"])
@@ -487,7 +519,7 @@ def build_default_workflow():
     # Router LLM for classification (faster, cheaper)
     router_llm_model = os.getenv("ROUTER_LLM_MODEL", "gpt-4o-mini")
     router_llm = ChatLiteLLM(model=router_llm_model, temperature=0, timeout=30, api_key=llm_key, api_base=llm_base, max_tokens=4096,custom_llm_provider="openai",api_version="2024-10-21")
-    return build_workflow(llm, router_llm)
+    return build_workflow(llm, router_llm, settings=settings)
 
 
 # -------------------------------------------------------------------------

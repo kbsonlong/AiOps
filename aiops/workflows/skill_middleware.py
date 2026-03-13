@@ -5,6 +5,7 @@ from typing import Dict, Optional
 
 from aiops.skills.commands import SkillCommandsManager
 from aiops.workflows.complexity_analyzer import analyze_task_complexity
+from aiops.workflows.middleware_chain import MiddlewareChain
 
 
 @lru_cache(maxsize=1)
@@ -45,6 +46,11 @@ def skill_integration_middleware(state: Dict) -> Dict:
             "user_instruction": user_instruction,
         },
     }
+
+
+async def skill_integration_chain_middleware(state: Dict, call_next) -> Dict:
+    updated = skill_integration_middleware(state)
+    return await call_next(updated)
 
 
 from aiops.skills.manager import SkillManager
@@ -184,3 +190,18 @@ def skill_solidification_middleware(state: Dict, next_state: Dict) -> Dict:
         }
         
     return next_state
+
+
+async def skill_solidification_chain_middleware(state: Dict, call_next) -> Dict:
+    next_state = await call_next(state)
+    return skill_solidification_middleware(state, next_state)
+
+
+@lru_cache(maxsize=1)
+def get_skill_pre_middleware_chain() -> MiddlewareChain[Dict]:
+    return MiddlewareChain().add(skill_integration_chain_middleware)
+
+
+@lru_cache(maxsize=1)
+def get_skill_post_middleware_chain() -> MiddlewareChain[Dict]:
+    return MiddlewareChain().add(skill_solidification_chain_middleware)

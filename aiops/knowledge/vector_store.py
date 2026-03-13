@@ -1,10 +1,12 @@
 import os
 import litellm
-from typing import List, Optional, Any
+from typing import List, Optional
 from langchain_chroma import Chroma
 from langchain_litellm import LiteLLMEmbeddings
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
+
+from aiops.config.settings import Settings
 
 class SafeLiteLLMEmbeddings(LiteLLMEmbeddings):
     """
@@ -39,12 +41,13 @@ class VectorStoreManager:
     
     def __init__(
         self, 
-        persist_directory: str = "./chroma_db",
-        collection_name: str = "knowledge_base",
-        embedding_model: str = "ollama/nomic-embed-text:v1.5", 
+        persist_directory: Optional[str] = None,
+        collection_name: Optional[str] = None,
+        embedding_model: Optional[str] = None,
         api_key: Optional[str] = None,
         api_base: Optional[str] = None,
-        embedding_function: Optional[Embeddings] = None
+        embedding_function: Optional[Embeddings] = None,
+        settings: Optional[Settings] = None,
     ):
         """
         Initialize the VectorStoreManager.
@@ -56,18 +59,42 @@ class VectorStoreManager:
             api_key: API key for the embedding model (optional, can be env var).
             embedding_function: Optional custom embedding function. If provided, overrides embedding_model.
         """
-        self.persist_directory = persist_directory
-        self.collection_name = collection_name
+        knowledge = settings.knowledge if settings else None
+
+        resolved_persist_directory = (
+            persist_directory
+            or (knowledge.vector_store.persist_directory if knowledge else None)
+            or "./chroma_db"
+        )
+        resolved_collection_name = (
+            collection_name
+            or (knowledge.vector_store.collection_name if knowledge else None)
+            or "knowledge_base"
+        )
+
+        self.persist_directory = resolved_persist_directory
+        self.collection_name = resolved_collection_name
         
         # Initialize embeddings
         if embedding_function:
             self.embeddings = embedding_function
         else:
-            # 优先使用传入参数，其次使用环境变量，最后使用默认值
-            model_name = embedding_model or os.getenv("LITELLM_EMBEDDING_MODEL", "ollama/nomic-embed-text:v1.5")
-            # 注意：LiteLLM 有时需要 api_key 即使是本地模型，视具体实现而定，通常给个空字符串即可
-            e_api_key = api_key or os.getenv("LITELLM_EMBEDDING_API_KEY", "")
-            e_api_base = api_base or os.getenv("LITELLM_EMBEDDING_API_BASE", "")
+            model_name = (
+                embedding_model
+                or (knowledge.embeddings.model if knowledge else None)
+                or os.getenv("LITELLM_EMBEDDING_MODEL")
+                or "ollama/nomic-embed-text:v1.5"
+            )
+            e_api_key = (
+                api_key
+                or (knowledge.embeddings.api_key if knowledge else None)
+                or os.getenv("LITELLM_EMBEDDING_API_KEY", "")
+            )
+            e_api_base = (
+                api_base
+                or (knowledge.embeddings.api_base if knowledge else None)
+                or os.getenv("LITELLM_EMBEDDING_API_BASE", "")
+            )
             
             self.embeddings = SafeLiteLLMEmbeddings(
                 model=model_name,
@@ -77,9 +104,9 @@ class VectorStoreManager:
         
         # Initialize Chroma
         self.vector_store = Chroma(
-            collection_name=collection_name,
+            collection_name=resolved_collection_name,
             embedding_function=self.embeddings,
-            persist_directory=persist_directory
+            persist_directory=resolved_persist_directory
         )
 
     def add_documents(self, documents: List[Document]) -> List[str]:

@@ -8,6 +8,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 from .logs_config import LogsConfig
+from .knowledge.knowledge_config import KnowledgeConfig
 from .metrics_config import MetricsConfig
 from .security_config import SecurityConfig
 from .skills_config import SkillsConfig
@@ -24,6 +25,7 @@ class Settings(BaseModel):
     logs: LogsConfig = Field(default_factory=LogsConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
+    knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
 
 
 def _load_yaml(path: Path) -> Dict[str, Any]:

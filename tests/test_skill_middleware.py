@@ -28,7 +28,8 @@ class TestSkillMiddleware(unittest.TestCase):
             "final_answer": "1. step\n2. step\n3. step\n4. step\n5. step\n",
             "context": {},
         }
-        updated = skill_solidification_middleware(state, next_state)
+        with patch("aiops.workflows.skill_middleware._auto_create_skill", return_value=False):
+            updated = skill_solidification_middleware(state, next_state)
         self.assertIn("系统提示", updated["final_answer"])
 
 

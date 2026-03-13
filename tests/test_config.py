@@ -21,6 +21,7 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(settings.app_name, "aiops-agent")
         self.assertEqual(settings.environment, "dev")
         self.assertEqual(settings.metrics.cpu_threshold, 80.0)
+        self.assertEqual(settings.knowledge.vector_store.collection_name, "knowledge_base")
 
     def test_yaml_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -42,6 +43,13 @@ class TestConfig(unittest.TestCase):
         os.environ["AIOPS_METRICS__CPU_THRESHOLD"] = "85"
         settings = load_settings()
         self.assertEqual(settings.metrics.cpu_threshold, 85.0)
+
+    def test_knowledge_env_override(self) -> None:
+        os.environ["AIOPS_KNOWLEDGE__EMBEDDINGS__MODEL"] = "ollama/nomic-embed-text:v2"
+        os.environ["AIOPS_KNOWLEDGE__VECTOR_STORE__PERSIST_DIRECTORY"] = "./tmp_chroma"
+        settings = load_settings()
+        self.assertEqual(settings.knowledge.embeddings.model, "ollama/nomic-embed-text:v2")
+        self.assertEqual(settings.knowledge.vector_store.persist_directory, "./tmp_chroma")
 
     def test_config_manager_reload(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
