@@ -3,7 +3,7 @@ import os
 import json
 import asyncio
 import operator
-from typing import Annotated, Literal, TypedDict, Optional
+from typing import Annotated, Literal, TypedDict, Optional, cast
 
 from langchain_litellm import ChatLiteLLM
 from langchain_litellm import ChatLiteLLMRouter
@@ -24,6 +24,7 @@ from aiops.config import load_settings
 from aiops.config.validator import validate_settings
 from aiops.agents.knowledge_agent import KnowledgeAgent
 from aiops.knowledge.vector_store import VectorStoreManager
+from aiops.cache.factory import get_process_cache
 from aiops.skills import SkillCompositionEngine, SkillDiscoveryService
 from aiops.skills.global_registry import get_global_skill_registry
 from aiops.workflows.skill_middleware import get_skill_post_middleware_chain, get_skill_pre_middleware_chain
@@ -429,22 +430,40 @@ def make_synthesize_with_middlewares_node(router_llm):
     return node
 
 
+def make_skill_orchestration_node(settings=None):
+    cache_enabled = bool(getattr(getattr(settings, "cache", None), "enabled", False))
+    cache_ttl = getattr(getattr(settings, "cache", None), "default_ttl_sec", 60.0)
+    cache_max_entries = getattr(getattr(settings, "cache", None), "max_entries", 2048)
+    cache = (
+        get_process_cache(default_ttl_sec=cache_ttl, max_entries=cache_max_entries) if cache_enabled else None
+    )
+
+    def node(state: RouterState) -> dict:
+        registry = get_global_skill_registry()
+        query_text = _normalize_query(state.get("query"))
+        key = f"skill_orchestrate:v1:{len(registry.skills)}:{query_text}"
+
+        def compute() -> dict:
+            discovery = SkillDiscoveryService(registry=registry)
+            skills = discovery.recommend_skills(query_text)
+            engine = SkillCompositionEngine()
+            plan = engine.build_execution_plan(skills, context={"query": query_text})
+            return {
+                "detected_skills": [skill.model_dump() for skill in skills],
+                "skill_execution_plan": {"order": plan.execution_order},
+            }
+
+        if cache is None:
+            return compute()
+
+        return cast(dict, cache.get_or_set(key, compute, ttl_sec=cache_ttl))
+
+    return node
+
+
 def skill_orchestration_node(state: RouterState) -> dict:
-    """
-    技能编排节点：基于查询动态发现和规划原子技能的执行顺序。
-    
-    使用 SkillRegistry 和 SkillCompositionEngine 来构建执行计划。
-    """
-    registry = get_global_skill_registry()
-    discovery = SkillDiscoveryService(registry=registry)
-    query_text = _normalize_query(state.get("query"))
-    skills = discovery.recommend_skills(query_text)
-    engine = SkillCompositionEngine()
-    plan = engine.build_execution_plan(skills, context={"query": query_text})
-    return {
-        "detected_skills": [skill.model_dump() for skill in skills],
-        "skill_execution_plan": {"order": plan.execution_order},
-    }
+    node = make_skill_orchestration_node(load_settings())
+    return node(state)
 
 
 def build_workflow(llm, router_llm, settings=None):
@@ -469,7 +488,7 @@ def build_workflow(llm, router_llm, settings=None):
         StateGraph(RouterState)
         .add_node("skill_middleware_pre", make_skill_middleware_pre_node())
         .add_node("classify", lambda state: classify_query(state, router_llm))
-        .add_node("skill_orchestrate", skill_orchestration_node)
+        .add_node("skill_orchestrate", make_skill_orchestration_node(settings))
         .add_node("metrics", make_query_node(metrics_agent, "metrics"))
         .add_node("logs", make_query_node(logs_agent, "logs"))
         .add_node("fault", make_query_node(fault_agent, "fault"))

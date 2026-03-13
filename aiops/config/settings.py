@@ -7,6 +7,7 @@ from typing import Any, Dict
 import yaml
 from pydantic import BaseModel, Field
 
+from .cache_config import CacheConfig
 from .logs_config import LogsConfig
 from .knowledge.knowledge_config import KnowledgeConfig
 from .metrics_config import MetricsConfig
@@ -21,6 +22,7 @@ class Settings(BaseModel):
     environment: str = Field(default="dev")
     log_level: str = Field(default="INFO")
     data_dir: str = Field(default="data")
+    cache: CacheConfig = Field(default_factory=CacheConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     logs: LogsConfig = Field(default_factory=LogsConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)

@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from aiops.core.events import SkillExecutionEvent, get_event_bus
 from aiops.security.controller import SecurityController
 from aiops.skills.models import SkillDefinition
 
@@ -28,12 +29,13 @@ class SkillExecutionRuntime:
         inputs: Dict[str, Any],
         executor,
     ) -> SkillExecutionResult:
+        bus = get_event_bus()
         decision = self.security_controller.check_action(
             action=skill_def.id,
             context={"inputs": inputs, "risk_level": skill_def.risk_level},
         )
         if not decision["allowed"]:
-            return SkillExecutionResult(
+            result = SkillExecutionResult(
                 skill_id=skill_def.id,
                 success=False,
                 outputs={},
@@ -41,8 +43,19 @@ class SkillExecutionRuntime:
                 timestamp=time.time(),
                 error="action_not_allowed",
             )
+            bus.publish_nowait(
+                SkillExecutionEvent(
+                    timestamp=result.timestamp,
+                    source="skills.runtime",
+                    skill_id=result.skill_id,
+                    duration_ms=0,
+                    success=False,
+                    error=result.error,
+                )
+            )
+            return result
         if decision["requires_approval"]:
-            return SkillExecutionResult(
+            result = SkillExecutionResult(
                 skill_id=skill_def.id,
                 success=False,
                 outputs={},
@@ -50,20 +63,42 @@ class SkillExecutionRuntime:
                 timestamp=time.time(),
                 error="approval_required",
             )
+            bus.publish_nowait(
+                SkillExecutionEvent(
+                    timestamp=result.timestamp,
+                    source="skills.runtime",
+                    skill_id=result.skill_id,
+                    duration_ms=0,
+                    success=False,
+                    error=result.error,
+                )
+            )
+            return result
 
         start = time.time()
         try:
             result = executor(**inputs)
             outputs = result if isinstance(result, dict) else {"result": result}
-            return SkillExecutionResult(
+            execution_result = SkillExecutionResult(
                 skill_id=skill_def.id,
                 success=True,
                 outputs=outputs,
                 execution_time=time.time() - start,
                 timestamp=time.time(),
             )
+            bus.publish_nowait(
+                SkillExecutionEvent(
+                    timestamp=execution_result.timestamp,
+                    source="skills.runtime",
+                    skill_id=execution_result.skill_id,
+                    duration_ms=int(execution_result.execution_time * 1000),
+                    success=True,
+                    error=None,
+                )
+            )
+            return execution_result
         except Exception as exc:  # pylint: disable=broad-except
-            return SkillExecutionResult(
+            execution_result = SkillExecutionResult(
                 skill_id=skill_def.id,
                 success=False,
                 outputs={},
@@ -71,3 +106,14 @@ class SkillExecutionRuntime:
                 timestamp=time.time(),
                 error=str(exc),
             )
+            bus.publish_nowait(
+                SkillExecutionEvent(
+                    timestamp=execution_result.timestamp,
+                    source="skills.runtime",
+                    skill_id=execution_result.skill_id,
+                    duration_ms=int(execution_result.execution_time * 1000),
+                    success=False,
+                    error=execution_result.error,
+                )
+            )
+            return execution_result
