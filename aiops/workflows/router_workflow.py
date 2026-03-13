@@ -131,74 +131,40 @@ def _classify_fallback(query_text: str) -> list[Classification]:
 def classify_query(state: RouterState, router_llm) -> dict:
     """
     路由分类节点：分析用户查询意图，决定需要调用的 AIOps 代理。
-    
+
     Args:
         state: 当前路由状态，包含原始查询
         router_llm: 用于分类的 LLM 模型
-        
+
     Returns:
         dict: 更新后的状态，包含分类结果列表
     """
     query_text = _normalize_query(state.get("query"))
-    try:
-        parser = JsonOutputParser(pydantic_object=ClassificationResult)
-        prompt = PromptTemplate(
-            template=(
-                "You are a helpful AIOps assistant.\n"
-                "Analyze the query and decide which agents to call.\n"
-                "Return ONLY a valid JSON object matching the schema below.\n"
-                "Do NOT include any markdown formatting (like ```json), explanations, or extra text.\n\n"
-                "Schema:\n{format_instructions}\n\n"
-                "Query: {query}\n\n"
-                "Rules:\n"
-                "1. Use 'knowledge_base' for queries about 'how-to', 'what is', 'policy', 'introduce', or general knowledge.\n"
-                "2. Use 'metrics'/'logs' for system status checks (cpu, memory, error logs).\n"
-                "3. AMBIGUITY CHECK: If the query is ambiguous (e.g., 'what is my system version?'), do NOT guess. "
-                "Ask for clarification: 'Do you mean the Operating System version (use tools) or the Business System version (use knowledge base)?'. "
-                "Set needs_clarification=True and provide a clarification_message in the user's language."
-                "\n\nOptional: If useful for downstream processing, also classify the high-level intent (consultation/operation) and language (zh/en/other).\n\n"
-                "JSON Response:"
-            ),
-            input_variables=["query"],
-            partial_variables={"format_instructions": parser.get_format_instructions()},
-        )
-        
-        # Note: Removing bind(response_format) as it caused empty output with some Ollama models
-        chain = prompt | router_llm | parser
-        result = chain.invoke({"query": query_text})
-        
-        # Validate result
-        if isinstance(result, dict):
-            # Try to validate with Pydantic model
-            obj = ClassificationResult.model_validate(result)
-            if obj.needs_clarification:
-                return {
-                    "query": query_text, 
-                    "classifications": [], 
-                    "final_answer": obj.clarification_message
-                }
-            
-            # Store intent info in context if available
-            context_update = {}
-            if obj.user_intent:
-                context_update["user_intent"] = obj.user_intent
-            if obj.user_language:
-                context_update["user_language"] = obj.user_language
-                
-            return {
-                "query": query_text, 
-                "classifications": obj.classifications,
-                "context": {**state.get("context", {}), **context_update}
-            }
-    except Exception as e:
-        log_exception(
-            e,
-            operation="router.classify_query",
-            logger=get_logger(),
-            extra={"query_len": len(query_text)},
-        )
-        
-    return {"query": query_text, "classifications": _classify_fallback(query_text)}
+
+    # Simple keyword-based classification to avoid LLM timeout issues
+    lowered = query_text.lower()
+
+    # Check for metrics-related keywords
+    metrics_keywords = ["cpu", "内存", "memory", "disk", "磁盘", "network", "网络", "prometheus", "指标", "metrics", "负载", "load"]
+    if any(k in lowered for k in metrics_keywords):
+        return {
+            "query": query_text,
+            "classifications": [{"source": "metrics", "query": query_text, "severity": "medium"}]
+        }
+
+    # Check for logs-related keywords
+    logs_keywords = ["log", "日志", "error", "exception", "panic", "fatal", "warning"]
+    if any(k in lowered for k in logs_keywords):
+        return {
+            "query": query_text,
+            "classifications": [{"source": "logs", "query": query_text, "severity": "medium"}]
+        }
+
+    # Default to knowledge_base
+    return {
+        "query": query_text,
+        "classifications": [{"source": "knowledge_base", "query": query_text, "severity": "low"}]
+    }
 
 
 def _ensure_critical_agents(
@@ -533,11 +499,11 @@ def build_default_workflow():
     llm_model = os.getenv("LLM_MODEL", "gpt-4o")
     llm_key = os.getenv("LITELLM_API_KEY","")
     llm_base = os.getenv("LITELLM_API_BASE","")
-    llm = ChatLiteLLM(model=llm_model, temperature=0, timeout=30, api_key=llm_key, api_base=llm_base, max_tokens=4096,custom_llm_provider="openai",api_version="2024-10-21")
-    
+    llm = ChatLiteLLM(model=llm_model, temperature=0, timeout=30, api_key=llm_key, api_base=llm_base, max_tokens=4096)
+
     # Router LLM for classification (faster, cheaper)
     router_llm_model = os.getenv("ROUTER_LLM_MODEL", "gpt-4o-mini")
-    router_llm = ChatLiteLLM(model=router_llm_model, temperature=0, timeout=30, api_key=llm_key, api_base=llm_base, max_tokens=4096,custom_llm_provider="openai",api_version="2024-10-21")
+    router_llm = ChatLiteLLM(model=router_llm_model, temperature=0, timeout=30, api_key=llm_key, api_base=llm_base, max_tokens=4096)
     return build_workflow(llm, router_llm, settings=settings)
 
 

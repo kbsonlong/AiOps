@@ -8,7 +8,7 @@ import argparse
 import os
 
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 from aiops.notifications import format_report
 from aiops.workflows import build_default_workflow
