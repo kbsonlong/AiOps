@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+import warnings
 from typing import Literal, Optional
 
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import PromptTemplate
 from pydantic import BaseModel, Field
+
+# Deprecation warning
+warnings.warn(
+    "IntentAgent is deprecated and will be removed in a future version. "
+    "Intent detection has been merged into the classify_query node in router_workflow.py. "
+    "This class is kept for backward compatibility only.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 
 class QueryIntent(BaseModel):
@@ -27,6 +37,25 @@ class SynthesisGate(BaseModel):
 
 
 class IntentAgent:
+    """Intent detection agent (DEPRECATED).
+
+    .. deprecated::
+        Intent detection has been merged into the `classify_query` node
+        in `router_workflow.py`. This class is kept for backward compatibility
+        only and will be removed in a future version.
+
+        Use `classify_query` function from `aiops.workflows.router_workflow`
+        for combined intent and classification detection.
+    """
+
+    def __init__(self, llm):
+        warnings.warn(
+            f"{self.__class__.__name__} is deprecated. "
+            "Use classify_query from router_workflow instead.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        self.llm = llm
     def __init__(self, llm):
         self.llm = llm
 
