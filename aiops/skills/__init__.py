@@ -5,6 +5,7 @@ from .composition import SkillCompositionEngine, SkillExecutionPlan
 from .discovery import SkillDiscoveryService
 from .monitoring import SkillExecutionMonitor
 from .registry import SkillRegistry
+from .global_registry import get_global_skill_registry
 from .runtime import SkillExecutionResult, SkillExecutionRuntime
 from .security import build_skill_security_controller, requires_approval
 from aiops.skills_lib import (
@@ -27,6 +28,7 @@ __all__ = [
     "SkillExecutionRuntime",
     "SkillExecutionResult",
     "SkillExecutionMonitor",
+    "get_global_skill_registry",
     "build_skill_security_controller",
     "requires_approval",
     "PROMETHEUS_SKILLS",

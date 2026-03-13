@@ -8,22 +8,23 @@
 **分析范围**: 核心架构、配置管理、技能系统、安全增强、性能优化、可观测性
 
 ### 变更记录
+
 - **v1.1** (2026-03-13): 新增 2.3 "意图识别与路由分类重复" 优化建议
 - **v1.0** (2026-03-13): 初始版本
 
----
+***
 
 ## 1. 项目架构评估
 
 ### 1.1 架构优势
 
-| 维度 | 评分 | 说明 |
-|------|------|------|
-| **模块化设计** | ⭐⭐⭐⭐ | 清晰的分层结构：agents/workflows/skills/tools |
-| **可扩展性** | ⭐⭐⭐⭐⭐ | 动态技能系统、插件化架构 |
-| **技术栈先进性** | ⭐⭐⭐⭐⭐ | LangChain + LangGraph + ChromaDB + LiteLLM |
-| **容器化部署** | ⭐⭐⭐⭐ | 完整的 Docker Compose 编排 |
-| **可观测性** | ⭐⭐⭐⭐⭐ | LangSmith 集成 + 监控栈 (Prometheus/VictoriaLogs/OTEL) |
+| 维度         | 评分    | 说明                                                |
+| ---------- | ----- | ------------------------------------------------- |
+| **模块化设计**  | ⭐⭐⭐⭐  | 清晰的分层结构：agents/workflows/skills/tools             |
+| **可扩展性**   | ⭐⭐⭐⭐⭐ | 动态技能系统、插件化架构                                      |
+| **技术栈先进性** | ⭐⭐⭐⭐⭐ | LangChain + LangGraph + ChromaDB + LiteLLM        |
+| **容器化部署**  | ⭐⭐⭐⭐  | 完整的 Docker Compose 编排                             |
+| **可观测性**   | ⭐⭐⭐⭐⭐ | LangSmith 集成 + 监控栈 (Prometheus/VictoriaLogs/OTEL) |
 
 ### 1.2 核心架构模式
 
@@ -50,11 +51,11 @@ graph TD
     Synthesize --> Skills[Skills System]
 ```
 
----
+***
 
 ## 2. 架构问题与优化建议
 
-### 2.1 配置管理混乱 [P0]
+### 2.1 配置管理混乱 \[P0]
 
 #### 问题描述
 
@@ -88,7 +89,7 @@ class ConfigPrefix:
 APP_ENV = "APP_"  # @deprecated use AIOPS_ instead
 ```
 
-2. **添加配置验证层**
+1. **添加配置验证层**
 
 ```python
 # aiops/config/validator.py
@@ -118,7 +119,7 @@ class ConfigValidator:
         )
 ```
 
-3. **配置迁移指南**
+1. **配置迁移指南**
 
 ```markdown
 # 迁移步骤
@@ -132,9 +133,9 @@ class ConfigValidator:
 **预计工作量**: 2 天
 **影响范围**: 全局配置
 
----
+***
 
-### 2.2 技能系统重复注册 [P1]
+### 2.2 技能系统重复注册 \[P1]
 
 #### 问题描述
 
@@ -207,7 +208,7 @@ class GlobalSkillRegistry:
         return self._stats.get(skill_id)
 ```
 
-2. **修改工作流使用全局注册表**
+1. **修改工作流使用全局注册表**
 
 ```python
 # aiops/workflows/router_workflow.py
@@ -224,9 +225,9 @@ def skill_orchestration_node(state: RouterState) -> dict:
 **预计工作量**: 1 天
 **影响范围**: 技能系统
 
----
+***
 
-### 2.3 意图识别与路由分类重复 [P1]
+### 2.3 意图识别与路由分类重复 \[P1]
 
 #### 问题描述
 
@@ -240,10 +241,10 @@ def skill_orchestration_node(state: RouterState) -> dict:
 
 **功能对比**：
 
-| 组件 | 分类维度 | 输出 | 实际用途 |
-|------|----------|------|----------|
-| **IntentAgent** | `consultation` vs `operation` | 意图 + 语言 + 原因 | 存入 `context` 但**从未被读取使用** |
-| **ClassifyQuery** | `metrics/logs/fault/security/knowledge_base` | Agent列表 + 严重程度 | **实际路由决策** |
+| 组件                | 分类维度                                         | 输出             | 实际用途                      |
+| ----------------- | -------------------------------------------- | -------------- | ------------------------- |
+| **IntentAgent**   | `consultation` vs `operation`                | 意图 + 语言 + 原因   | 存入 `context` 但**从未被读取使用** |
+| **ClassifyQuery** | `metrics/logs/fault/security/knowledge_base` | Agent列表 + 严重程度 | **实际路由决策**                |
 
 #### 影响分析
 
@@ -255,7 +256,7 @@ def skill_orchestration_node(state: RouterState) -> dict:
 
 #### 优化方案：合并到 ClassifyQuery
 
-**1. 扩展 `ClassificationResult` 模型**
+**1. 扩展** **`ClassificationResult`** **模型**
 
 ```python
 # aiops/workflows/router_workflow.py
@@ -281,7 +282,7 @@ class ClassificationResult(BaseModel):
     )
 ```
 
-**2. 移除 `intent_check_node`**
+**2. 移除** **`intent_check_node`**
 
 ```python
 # 删除以下节点和相关代码
@@ -299,7 +300,7 @@ def build_workflow(llm, router_llm):
     )
 ```
 
-**3. 更新 `classify_query` 的 Prompt**
+**3. 更新** **`classify_query`** **的 Prompt**
 
 ```python
 # 在现有 prompt 中添加意图检测（可选）
@@ -325,7 +326,7 @@ result = structured_llm.invoke([
 ])
 ```
 
-**4. 保留 `IntentAgent` 类（可选）**
+**4. 保留** **`IntentAgent`** **类（可选）**
 
 如果未来需要独立的意图分析能力，可以保留 `IntentAgent` 类，但从工作流中移除：
 
@@ -354,12 +355,12 @@ graph LR
 
 #### 收益
 
-| 指标 | 当前 | 优化后 | 改善 |
-|------|------|--------|------|
-| LLM 调用次数 | 2 次 | 1 次 | -50% |
-| 工作流节点数 | 多 1 个 | 减少 | 简化 |
-| 代码复杂度 | 高 | 低 | 更清晰 |
-| 响应延迟 | ~2s | ~1s | 更快 |
+| 指标       | 当前    | 优化后  | 改善   |
+| -------- | ----- | ---- | ---- |
+| LLM 调用次数 | 2 次   | 1 次  | -50% |
+| 工作流节点数   | 多 1 个 | 减少   | 简化   |
+| 代码复杂度    | 高     | 低    | 更清晰  |
+| 响应延迟     | \~2s  | \~1s | 更快   |
 
 #### 实施步骤
 
@@ -379,9 +380,9 @@ graph LR
 **预计工作量**: 0.5 天
 **影响范围**: 工作流系统
 
----
+***
 
-### 2.4 缺少中间件链机制 [P2]
+### 2.4 缺少中间件链机制 \[P2]
 
 #### 问题描述
 
@@ -470,9 +471,9 @@ class AuditMiddleware(Middleware):
 **预计工作量**: 5 天
 **影响范围**: 工作流系统
 
----
+***
 
-### 2.5 向量存储配置耦合 [P1]
+### 2.5 向量存储配置耦合 \[P1]
 
 #### 问题描述
 
@@ -530,9 +531,9 @@ class VectorStoreManager:
 **预计工作量**: 2 天
 **影响范围**: 知识库系统
 
----
+***
 
-### 2.6 异常处理不统一 [P0]
+### 2.6 异常处理不统一 \[P0]
 
 #### 问题描述
 
@@ -575,7 +576,7 @@ class AIOpsSkillError(AIOpsException):
     pass
 ```
 
-2. **实现错误处理器**
+1. **实现错误处理器**
 
 ```python
 # aiops/core/error_handler.py
@@ -622,7 +623,7 @@ class ErrorHandler:
             return default_return or {"error": "Unexpected error occurred"}
 ```
 
-3. **添加错误追踪**
+1. **添加错误追踪**
 
 ```python
 # aiops/telemetry/tracing.py
@@ -651,11 +652,11 @@ def traced_agent_call(agent_name: str):
 **预计工作量**: 3 天
 **影响范围**: 全局
 
----
+***
 
 ## 3. 新增架构组件建议
 
-### 3.1 依赖注入容器 [P3]
+### 3.1 依赖注入容器 \[P3]
 
 #### 目的
 
@@ -722,9 +723,9 @@ def setup_container() -> Container:
 **预计工作量**: 7 天
 **影响范围**: 架构层面
 
----
+***
 
-### 3.2 事件总线 [P2]
+### 3.2 事件总线 \[P2]
 
 #### 目的
 
@@ -808,9 +809,9 @@ class SkillExecutionEvent(Event):
 **预计工作量**: 5 天
 **影响范围**: 通信架构
 
----
+***
 
-### 3.3 健康检查系统 [P1]
+### 3.3 健康检查系统 \[P1]
 
 #### 目的
 
@@ -922,11 +923,11 @@ async def readiness_check():
 **预计工作量**: 1 天
 **影响范围**: 运维
 
----
+***
 
 ## 4. 性能优化建议
 
-### 4.1 添加缓存层 [P2]
+### 4.1 添加缓存层 \[P2]
 
 ```python
 # aiops/cache/manager.py
@@ -990,7 +991,7 @@ async def get_agent_response(query: str, agent_name: str) -> str:
 **预计工作量**: 3 天
 **影响范围**: 性能
 
----
+***
 
 ### 4.2 连接池管理
 
@@ -1025,7 +1026,7 @@ class HTTPConnectionPool:
             await session.close()
 ```
 
----
+***
 
 ## 5. 安全增强建议
 
@@ -1107,7 +1108,7 @@ class EnhancedSandbox:
             signal.alarm(0)
 ```
 
----
+***
 
 ### 5.2 敏感数据加密
 
@@ -1144,7 +1145,7 @@ class EncryptionManager:
         return self.decrypt(encrypted_key)
 ```
 
----
+***
 
 ## 6. 可观测性说明
 
@@ -1153,6 +1154,7 @@ class EncryptionManager:
 项目已集成 **LangSmith** 可观测性平台，无需额外添加基础可观测性组件。
 
 **环境变量配置** (`.env.example`):
+
 ```bash
 LANGCHAIN_TRACING_V2=true
 LANGCHAIN_TRACING=true
@@ -1174,15 +1176,14 @@ LANGSMITH_PROJECT="aiops"
 
 1. **结构化日志增强** (可选)
    - 使用 `structlog` 统一日志格式
-   - 添加链路追踪 ID (trace_id) 关联
-
+   - 添加链路追踪 ID (trace\_id) 关联
 2. **自定义指标导出** (可选)
    - 业务指标 (Agent 调用次数、成功率)
    - 导出到 Prometheus 与基础设施监控集成
 
 **注意**: 上述为可选增强，非必需项。
 
----
+***
 
 ## 7. 测试优化建议
 
@@ -1218,7 +1219,7 @@ tests/
 └── conftest.py                   # Pytest 配置
 ```
 
----
+***
 
 ## 8. 部署优化建议
 
@@ -1282,28 +1283,29 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 CMD ["uv", "run", "python", "main.py"]
 ```
 
----
+***
 
 ## 9. 优化优先级总结
 
-| 优先级 | 项目 | 预计工作量 | 影响力 | 依赖 |
-|--------|------|-----------|--------|------|
-| **P0** | 统一配置管理 | 2 天 | 高 | 无 |
-| **P0** | 异常处理标准化 | 3 天 | 高 | 无 |
-| **P1** | 意图识别与路由分类合并 | 0.5 天 | 中 | 无 |
-| **P1** | 技能注册单例化 | 1 天 | 中 | 无 |
-| **P1** | 向量存储配置解耦 | 2 天 | 中 | P0 |
-| **P1** | 健康检查系统 | 1 天 | 中 | 无 |
-| **P2** | 缓存层实现 | 3 天 | 中 | 无 |
-| **P2** | 事件总线 | 5 天 | 高 | P0 |
-| **P2** | 中间件链机制 | 5 天 | 高 | 无 |
-| **P3** | 依赖注入容器 | 7 天 | 高 | P0, P2 |
+| 优先级    | 项目          | 预计工作量 | 影响力 | 依赖     |
+| ------ | ----------- | ----- | --- | ------ |
+| **P0** | 统一配置管理      | 2 天   | 高   | 无      |
+| **P0** | 异常处理标准化     | 3 天   | 高   | 无      |
+| **P1** | 意图识别与路由分类合并 | 0.5 天 | 中   | 无      |
+| **P1** | 技能注册单例化     | 1 天   | 中   | 无      |
+| **P1** | 向量存储配置解耦    | 2 天   | 中   | P0     |
+| **P1** | 健康检查系统      | 1 天   | 中   | 无      |
+| **P2** | 缓存层实现       | 3 天   | 中   | 无      |
+| **P2** | 事件总线        | 5 天   | 高   | P0     |
+| **P2** | 中间件链机制      | 5 天   | 高   | 无      |
+| **P3** | 依赖注入容器      | 7 天   | 高   | P0, P2 |
 
----
+***
 
 ## 10. 实施路线图
 
 ### 第一阶段（1-2 周）- 基础优化
+
 1. 统一配置管理
 2. 异常处理标准化
 3. **意图识别与路由分类合并** ⚡ (快速见效)
@@ -1311,34 +1313,38 @@ CMD ["uv", "run", "python", "main.py"]
 5. 技能注册单例化
 
 ### 第二阶段（3-4 周）- 架构增强
+
 1. 向量存储配置解耦
 2. 实现缓存层
 3. 实现事件总线
 4. 中间件链机制
 
 ### 第三阶段（5-8 周）- 高级特性
+
 1. 依赖注入容器
 2. 沙箱强化
 3. 性能优化
 4. 敏感数据加密
 
----
+***
 
 ## 附录：已有基础设施
 
 ### 可观测性
+
 - ✅ LangSmith 集成 (追踪、监控、评估)
 - ⚪ structlog (可选，结构化日志增强)
 - ⚪ Prometheus 指标 (可选，业务指标导出)
 
 ### 监控栈 (Docker Compose)
+
 - ✅ Prometheus (指标存储)
 - ✅ VictoriaLogs (日志存储)
 - ✅ OpenTelemetry Collector (数据收集)
 - ✅ ChromaDB (向量数据库)
 - ✅ Redis (缓存)
 
----
+***
 
 **文档状态**: 待审核
 **下次更新**: 实施第一阶段后更新进展

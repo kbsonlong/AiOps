@@ -21,14 +21,14 @@ def main() -> None:
 
     workflow = build_default_workflow()
     result = workflow.invoke({"query": args.query})
-    print("Original query:", result["query"])
-    print("\nClassifications:")
+    # print("Original query:", result["query"])
+    # print("\nClassifications:")
     for c in result["classifications"]:
         print(f"  {c['source']} ({c['severity']}): {c['query']}")
     print("\nFinal Answer:\n", result["final_answer"])
 
-    report = format_report(result["query"], result["results"])
-    print("\nReport:\n", report)
+    # report = format_report(result["query"], result["results"])
+    # print("\nReport:\n", report)
 
 
 if __name__ == "__main__":

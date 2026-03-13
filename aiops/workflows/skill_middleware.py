@@ -163,9 +163,16 @@ def skill_solidification_middleware(state: Dict, next_state: Dict) -> Dict:
         
         if created:
             print(f"Skill auto-created for query: {state.get('query')}")
-            
+
+        final_answer = next_state.get("final_answer", "")
+        if "系统提示" not in final_answer:
+            final_answer = (
+                f"{final_answer}\n\n系统提示: 如果该问题会频繁出现，可将上述步骤固化为技能以便复用。"
+            )
+
         return {
             **next_state,
+            "final_answer": final_answer,
             "context": {
                 **next_state.get("context", {}),
                 "should_solidify": True,

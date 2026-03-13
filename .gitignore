@@ -14,3 +14,4 @@ uv.lock
 chroma_db/
 chroma_db_local/
 .use_local_embeddings
+logs/

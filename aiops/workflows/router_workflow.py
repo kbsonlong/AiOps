@@ -20,17 +20,15 @@ from aiops.agents import (
     build_metrics_agent,
     build_security_agent,
 )
-from aiops.agents import IntentAgent
+from aiops.config import load_settings
+from aiops.config.validator import validate_settings
 from aiops.agents.knowledge_agent import KnowledgeAgent
 from aiops.knowledge.vector_store import VectorStoreManager
-from aiops.skills import SkillCompositionEngine, SkillDiscoveryService, SkillRegistry
-from aiops.skills_lib import (
-    FAULT_DIAGNOSIS_SKILLS,
-    PROMETHEUS_SKILLS,
-    SECURITY_SKILLS,
-    VICTORIALOGS_SKILLS,
-)
+from aiops.skills import SkillCompositionEngine, SkillDiscoveryService
+from aiops.skills.global_registry import get_global_skill_registry
 from aiops.workflows.skill_middleware import skill_integration_middleware, skill_solidification_middleware
+from aiops.core.error_handler import get_logger, log_exception, safe_execute
+from aiops.exceptions import AgentException, ConfigException
 
 
 Severity = Literal["low", "medium", "high", "critical"]
@@ -68,8 +66,20 @@ class ClassificationResult(BaseModel):
     classifications: list[Classification] = Field(
         description="Agents to invoke with targeted queries and severity level"
     )
-    needs_clarification: bool = Field(description="True if the user query is ambiguous and needs clarification. False otherwise.")
-    clarification_message: Optional[str] = Field(description="If needs_clarification is True, provide a polite question to ask the user for more details in their language. Otherwise empty.")
+    needs_clarification: bool = Field(
+        description="True if the user query is ambiguous and needs clarification"
+    )
+    clarification_message: Optional[str] = Field(
+        description="If needs_clarification is True, provide a polite question to ask the user for more details in their language. Otherwise empty."
+    )
+    user_intent: Optional[Literal["consultation", "operation"]] = Field(
+        default=None,
+        description="High-level intent: consultation (ask for info) or operation (perform action)"
+    )
+    user_language: Optional[Literal["zh", "en", "other"]] = Field(
+        default=None,
+        description="User query language for response formatting"
+    )
 
 def _coerce_text(value) -> str:
     if value is None:
@@ -107,23 +117,15 @@ def _normalize_query(raw) -> str:
     text = _coerce_text(raw)
     return text.strip() if text else ""
 
-def intent_check_node(state: RouterState, router_llm) -> dict:
-    query_text = _normalize_query(state.get("query"))
-    if not query_text:
-        return {}
-    try:
-        intent = IntentAgent(router_llm).detect_query_intent(query_text)
-        return {
-            "context": {
-                **state.get("context", {}),
-                "user_intent": intent.intent,
-                "user_language": intent.language,
-                "user_intent_reason": intent.reason,
-            }
-        }
-    except Exception:
-        return {}
-
+def _classify_fallback(query_text: str) -> list[Classification]:
+    lowered = query_text.lower()
+    if any(k in lowered for k in ("log", "日志", "error", "exception", "panic", "fatal")):
+        return [{"source": "logs", "query": query_text, "severity": "medium"}]
+    if any(k in lowered for k in ("cpu", "内存", "memory", "disk", "磁盘", "network", "网络", "prometheus", "metrics", "指标")):
+        return [{"source": "metrics", "query": query_text, "severity": "medium"}]
+    if any(k in lowered for k in ("漏洞", "入侵", "攻击", "安全", "auth", "permission", "403", "401", "unauthorized")):
+        return [{"source": "security", "query": query_text, "severity": "high"}]
+    return [{"source": "knowledge_base", "query": query_text, "severity": "low"}]
 
 def classify_query(state: RouterState, router_llm) -> dict:
     """
@@ -137,41 +139,6 @@ def classify_query(state: RouterState, router_llm) -> dict:
         dict: 更新后的状态，包含分类结果列表
     """
     query_text = _normalize_query(state.get("query"))
-    try:
-        structured_llm = router_llm.with_structured_output(ClassificationResult)
-        result = structured_llm.invoke([
-            {
-                "role": "system",
-                "content": (
-                    "Analyze the query and decide which AIOps agents to call. "
-                    "Available sources: metrics, logs, fault, security, knowledge_base. "
-                    "For each, produce a focused sub-query and a severity: low, medium, high, critical. "
-                    "Return only relevant sources. "
-                    "\n\nRules:"
-                    "\n1. Use 'knowledge_base' for queries about 'how-to', 'what is', 'policy', 'introduce', or general knowledge."
-                    "\n2. Use 'metrics'/'logs' for system status checks (cpu, memory, error logs)."
-                    "\n3. AMBIGUITY CHECK: If the query is ambiguous (e.g., 'what is my system version?'), do NOT guess. "
-                    "Ask for clarification: 'Do you mean the Operating System version (use tools) or the Business System version (use knowledge base)?'. "
-                    "Set needs_clarification=True and provide a clarification_message in the user's language."
-                ),
-            },
-            {"role": "user", "content": query_text},
-        ])
-        if result is not None:
-            if result.needs_clarification:
-                # Store the clarification message as final_answer directly in the state
-                # The state update here will be merged into the graph state
-                return {
-                    "query": query_text, 
-                    "classifications": [], 
-                    "final_answer": result.clarification_message
-                }
-            return {"query": query_text, "classifications": result.classifications, "final_answer": ""} # Clear final_answer if not needed
-    except Exception as e:
-        # Silently fail or log warning if needed, but for user experience we just fallback
-        pass
-
-    # Fallback: Manual JSON prompting with forced JSON mode
     try:
         parser = JsonOutputParser(pydantic_object=ClassificationResult)
         prompt = PromptTemplate(
@@ -187,7 +154,8 @@ def classify_query(state: RouterState, router_llm) -> dict:
                 "2. Use 'metrics'/'logs' for system status checks (cpu, memory, error logs).\n"
                 "3. AMBIGUITY CHECK: If the query is ambiguous (e.g., 'what is my system version?'), do NOT guess. "
                 "Ask for clarification: 'Do you mean the Operating System version (use tools) or the Business System version (use knowledge base)?'. "
-                "Set needs_clarification=True and provide a clarification_message in the user's language.\n\n"
+                "Set needs_clarification=True and provide a clarification_message in the user's language."
+                "\n\nOptional: If useful for downstream processing, also classify the high-level intent (consultation/operation) and language (zh/en/other).\n\n"
                 "JSON Response:"
             ),
             input_variables=["query"],
@@ -208,12 +176,28 @@ def classify_query(state: RouterState, router_llm) -> dict:
                     "classifications": [], 
                     "final_answer": obj.clarification_message
                 }
-            return {"query": query_text, "classifications": obj.classifications}
+            
+            # Store intent info in context if available
+            context_update = {}
+            if obj.user_intent:
+                context_update["user_intent"] = obj.user_intent
+            if obj.user_language:
+                context_update["user_language"] = obj.user_language
+                
+            return {
+                "query": query_text, 
+                "classifications": obj.classifications,
+                "context": {**state.get("context", {}), **context_update}
+            }
     except Exception as e:
-        print(f"Error: JSON fallback also failed. {e}")
+        log_exception(
+            e,
+            operation="router.classify_query",
+            logger=get_logger(),
+            extra={"query_len": len(query_text)},
+        )
         
-    # Return empty classifications if all fails
-    return {"query": query_text, "classifications": []}
+    return {"query": query_text, "classifications": _classify_fallback(query_text)}
 
 
 def _ensure_critical_agents(
@@ -311,13 +295,19 @@ def _safe_extract_content(resp) -> str:
 
 
 def _invoke_agent(agent, query_text: str) -> str:
-    try:
+    def _run() -> str:
         payload = {"messages": [{"role": "user", "content": query_text}]}
         resp = agent.invoke(payload)
         return _safe_extract_content(resp)
-    except Exception as e:
-        # 统一异常回退文案，可加日志或监控
-        return f"Agent invocation failed: {e}"
+
+    result = safe_execute(
+        _run,
+        operation="router.invoke_agent",
+        fallback=AgentException("agent_invoke_failed").safe_message,
+        logger=get_logger(),
+        extra={"agent": getattr(agent, "name", type(agent).__name__)},
+    )
+    return result or AgentException("agent_invoke_failed").safe_message
 
 
 def make_query_node(agent, source: Source):
@@ -386,18 +376,6 @@ def synthesize_results(state: RouterState, router_llm) -> dict:
 
     query_text = _normalize_query(state.get("query"))
 
-    # Special handling for knowledge_base to prevent hallucinations
-    # If knowledge base is the only source and it explicitly says it doesn't know, 
-    # return that directly without synthesis.
-    if len(state["results"]) == 1 and state["results"][0]["source"] == "knowledge_base":
-        res = state["results"][0]["result"]
-        try:
-            gate = IntentAgent(router_llm).gate_synthesis(query_text, res)
-            if not gate.needs_synthesis:
-                return {"final_answer": (gate.response or res)}
-        except Exception:
-            pass
-
     formatted = [
         f"From {item['source'].title()}:\n{item['result']}"
         for item in state["results"]
@@ -425,11 +403,7 @@ def skill_orchestration_node(state: RouterState) -> dict:
     
     使用 SkillRegistry 和 SkillCompositionEngine 来构建执行计划。
     """
-    registry = SkillRegistry()
-    registry.bulk_register(PROMETHEUS_SKILLS)
-    registry.bulk_register(VICTORIALOGS_SKILLS)
-    registry.bulk_register(FAULT_DIAGNOSIS_SKILLS)
-    registry.bulk_register(SECURITY_SKILLS)
+    registry = get_global_skill_registry()
     discovery = SkillDiscoveryService(registry=registry)
     query_text = _normalize_query(state.get("query"))
     skills = discovery.recommend_skills(query_text)
@@ -462,7 +436,6 @@ def build_workflow(llm, router_llm):
     graph = (
         StateGraph(RouterState)
         .add_node("skill_middleware_pre", skill_integration_middleware)
-        .add_node("intent_check", lambda state: intent_check_node(state, router_llm))
         .add_node("classify", lambda state: classify_query(state, router_llm))
         .add_node("skill_orchestrate", skill_orchestration_node)
         .add_node("metrics", make_query_node(metrics_agent, "metrics"))
@@ -473,8 +446,7 @@ def build_workflow(llm, router_llm):
         .add_node("synthesize", lambda state: synthesize_results(state, router_llm))
         .add_node("skill_middleware_post", lambda state: skill_solidification_middleware(state, state))
         .add_edge(START, "skill_middleware_pre")
-        .add_edge("skill_middleware_pre", "intent_check")
-        .add_edge("intent_check", "classify")
+        .add_edge("skill_middleware_pre", "classify")
         .add_conditional_edges("classify", route_to_agents, ["metrics", "logs", "fault", "security", "knowledge_base"])
         .add_edge("classify", "skill_orchestrate")
         .add_edge("metrics", "synthesize")
@@ -501,6 +473,11 @@ def build_default_workflow():
     - Ollama: "ollama/llama3"
     - Azure: "azure/gpt-4"
     """
+    settings = load_settings()
+    validation = validate_settings(settings)
+    if not validation.valid:
+        raise ConfigException(validation.to_message())
+
     # Main LLM for complex tasks (synthesis, agent execution)
     llm_model = os.getenv("LLM_MODEL", "gpt-4o")
     llm_key = os.getenv("LITELLM_API_KEY","")

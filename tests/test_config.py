@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from aiops.config import ConfigManager, load_settings
+from aiops.config.validator import validate_settings
 
 
 class TestConfig(unittest.TestCase):
@@ -53,7 +54,26 @@ class TestConfig(unittest.TestCase):
             self.assertTrue(manager.check_reload())
             self.assertEqual(manager.settings.app_name, "aiops-reload")
 
+    def test_validate_settings_success(self) -> None:
+        settings = load_settings()
+        result = validate_settings(settings)
+        self.assertTrue(result.valid)
+        self.assertEqual(result.issues, [])
+
+    def test_validate_settings_fails_on_empty_url(self) -> None:
+        os.environ["AIOPS_METRICS__PROMETHEUS_BASE_URL"] = ""
+        settings = load_settings()
+        result = validate_settings(settings)
+        self.assertFalse(result.valid)
+        self.assertTrue(any(issue.path == "metrics.prometheus_base_url" for issue in result.issues))
+
+    def test_validate_settings_fails_on_non_http_url(self) -> None:
+        os.environ["AIOPS_LOGS__VICTORIALOGS_BASE_URL"] = "ftp://victorialogs:9428"
+        settings = load_settings()
+        result = validate_settings(settings)
+        self.assertFalse(result.valid)
+        self.assertTrue(any(issue.path == "logs.victorialogs_base_url" for issue in result.issues))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-
