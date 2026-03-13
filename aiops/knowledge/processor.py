@@ -41,23 +41,13 @@ class DocumentProcessor:
             
         file_ext = os.path.splitext(file_path)[1].lower()
         
-        if file_ext == ".md":
-            try:
-                loader = UnstructuredMarkdownLoader(file_path)
-                return loader.load()
-            except ImportError:
-                # Fallback to TextLoader if unstructured is not available or fails
-                loader = TextLoader(file_path)
-                return loader.load()
-            except Exception as e:
-                # If UnstructuredMarkdownLoader fails (e.g. missing system dependencies), fallback
-                print(f"Warning: Failed to use UnstructuredMarkdownLoader: {e}. Falling back to TextLoader.")
-                loader = TextLoader(file_path)
-                return loader.load()
-        else:
-            # Default to TextLoader for other text files
-            loader = TextLoader(file_path)
+        # Always use TextLoader for better compatibility and simple text extraction
+        try:
+            loader = TextLoader(file_path, encoding='utf-8')
             return loader.load()
+        except Exception as e:
+            print(f"Warning: Failed to load {file_path}: {e}")
+            return []
 
     def split_documents(self, documents: List[Document]) -> List[Document]:
         """

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from .logs_config import LogsConfig
 from .metrics_config import MetricsConfig
 from .security_config import SecurityConfig
+from .skills_config import SkillsConfig
 
 
 class Settings(BaseModel):
@@ -22,6 +23,7 @@ class Settings(BaseModel):
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     logs: LogsConfig = Field(default_factory=LogsConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
+    skills: SkillsConfig = Field(default_factory=SkillsConfig)
 
 
 def _load_yaml(path: Path) -> Dict[str, Any]:
@@ -117,4 +119,3 @@ class ConfigManager:
             self.reload()
             return True
         return False
-

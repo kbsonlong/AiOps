@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 from pydantic import BaseModel, Field
 
@@ -21,6 +21,14 @@ class SkillRiskLevel(str, Enum):
     MEDIUM = "medium"
     HIGH = "high"
     CRITICAL = "critical"
+
+
+class SkillScope(str, Enum):
+    """Skill access scope."""
+    GLOBAL = "global"           # All agents can access
+    AGENT_GROUP = "group"       # Specific agent group
+    AGENT_SPECIFIC = "agent"    # Specific agent only
+    PRIVATE = "private"         # Creator only
 
 
 class SkillRequirement(BaseModel):

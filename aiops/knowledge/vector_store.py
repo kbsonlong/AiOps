@@ -1,9 +1,36 @@
 import os
+import litellm
 from typing import List, Optional, Any
 from langchain_chroma import Chroma
 from langchain_litellm import LiteLLMEmbeddings
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
+
+class SafeLiteLLMEmbeddings(LiteLLMEmbeddings):
+    """
+    A wrapper around LiteLLMEmbeddings that ensures global litellm configuration
+    doesn't interfere with the embedding call.
+    """
+    def embed_query(self, text: str) -> List[float]:
+        original_base = getattr(litellm, "api_base", None)
+        try:
+            if self.api_base:
+                litellm.api_base = None
+            return super().embed_query(text)
+        finally:
+            if self.api_base:
+                litellm.api_base = original_base
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        original_base = getattr(litellm, "api_base", None)
+        try:
+            if self.api_base:
+                litellm.api_base = None
+            return super().embed_documents(texts)
+        finally:
+            if self.api_base:
+                litellm.api_base = original_base
+
 
 class VectorStoreManager:
     """
@@ -36,18 +63,16 @@ class VectorStoreManager:
         if embedding_function:
             self.embeddings = embedding_function
         else:
-            # Ensure API key is available if needed
-            if api_base:
-                os.environ["LITELLM_EMBEDDING_API_BASE"] = api_base
-            if api_key:
-                os.environ["LITELLM_EMBEDDING_API_KEY"] = api_key
+            # 优先使用传入参数，其次使用环境变量，最后使用默认值
+            model_name = embedding_model or os.getenv("LITELLM_EMBEDDING_MODEL", "ollama/nomic-embed-text:v1.5")
+            # 注意：LiteLLM 有时需要 api_key 即使是本地模型，视具体实现而定，通常给个空字符串即可
+            e_api_key = api_key or os.getenv("LITELLM_EMBEDDING_API_KEY", "")
+            e_api_base = api_base or os.getenv("LITELLM_EMBEDDING_API_BASE", "")
             
-            os.environ["LITELLM_EMBEDDING_MODEL"] = embedding_model
-            
-            self.embeddings = LiteLLMEmbeddings(
-                model=embedding_model,
-                api_base=api_base,
-                api_key=api_key,
+            self.embeddings = SafeLiteLLMEmbeddings(
+                model=model_name,
+                api_base=e_api_base,
+                api_key=e_api_key,
             )
         
         # Initialize Chroma
@@ -84,14 +109,21 @@ class VectorStoreManager:
         """
         return self.vector_store.similarity_search(query, k=k)
 
-    def as_retriever(self, **kwargs: Any):
+    def as_retriever(self, search_type: str = "similarity", search_kwargs: Optional[dict] = None):
         """
         Return the vector store as a retriever.
         
         Args:
-            **kwargs: Arguments to pass to the retriever (e.g. search_kwargs).
+            search_type: The search type ("similarity", "mmr", etc.).
+            search_kwargs: Arguments to pass to the retriever (e.g. k, score_threshold).
             
         Returns:
             A retriever object.
         """
-        return self.vector_store.as_retriever(**kwargs)
+        # Default to k=4 if not specified
+        kwargs = search_kwargs or {"k": 4}
+        
+        return self.vector_store.as_retriever(
+            search_type=search_type,
+            search_kwargs=kwargs
+        )

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l /Users/zengshenglong/Code/PyWorkSpace/AiOps/aiops/**/*.py | tail -20)",
+      "Bash(find /Users/zengshenglong/Code/PyWorkSpace/AiOps -name \"*.md\" -path \"*/docs/*\" -exec wc -l {} + | sort -rn | head -10)"
+    ]
+  }
+}

@@ -6,6 +6,8 @@ import operator
 from typing import Annotated, Literal, TypedDict, Optional
 
 from langchain_litellm import ChatLiteLLM
+from langchain_litellm import ChatLiteLLMRouter
+from litellm import Router
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import PromptTemplate
 from langgraph.graph import END, START, StateGraph
@@ -18,6 +20,7 @@ from aiops.agents import (
     build_metrics_agent,
     build_security_agent,
 )
+from aiops.agents import IntentAgent
 from aiops.agents.knowledge_agent import KnowledgeAgent
 from aiops.knowledge.vector_store import VectorStoreManager
 from aiops.skills import SkillCompositionEngine, SkillDiscoveryService, SkillRegistry
@@ -27,6 +30,7 @@ from aiops.skills_lib import (
     SECURITY_SKILLS,
     VICTORIALOGS_SKILLS,
 )
+from aiops.workflows.skill_middleware import skill_integration_middleware, skill_solidification_middleware
 
 
 Severity = Literal["low", "medium", "high", "critical"]
@@ -53,6 +57,7 @@ class RouterState(TypedDict):
     classifications: list[Classification]
     results: Annotated[list[AgentOutput], operator.add]
     final_answer: str
+    context: dict
     detected_skills: list[dict]
     skill_execution_plan: dict
     knowledge_context: Optional[str]
@@ -63,6 +68,8 @@ class ClassificationResult(BaseModel):
     classifications: list[Classification] = Field(
         description="Agents to invoke with targeted queries and severity level"
     )
+    needs_clarification: bool = Field(description="True if the user query is ambiguous and needs clarification. False otherwise.")
+    clarification_message: Optional[str] = Field(description="If needs_clarification is True, provide a polite question to ask the user for more details in their language. Otherwise empty.")
 
 def _coerce_text(value) -> str:
     if value is None:
@@ -100,6 +107,23 @@ def _normalize_query(raw) -> str:
     text = _coerce_text(raw)
     return text.strip() if text else ""
 
+def intent_check_node(state: RouterState, router_llm) -> dict:
+    query_text = _normalize_query(state.get("query"))
+    if not query_text:
+        return {}
+    try:
+        intent = IntentAgent(router_llm).detect_query_intent(query_text)
+        return {
+            "context": {
+                **state.get("context", {}),
+                "user_intent": intent.intent,
+                "user_language": intent.language,
+                "user_intent_reason": intent.reason,
+            }
+        }
+    except Exception:
+        return {}
+
 
 def classify_query(state: RouterState, router_llm) -> dict:
     """
@@ -123,13 +147,26 @@ def classify_query(state: RouterState, router_llm) -> dict:
                     "Available sources: metrics, logs, fault, security, knowledge_base. "
                     "For each, produce a focused sub-query and a severity: low, medium, high, critical. "
                     "Return only relevant sources. "
-                    "Use 'knowledge_base' for queries about 'how-to', 'what is', 'policy', 'introduce', or general knowledge."
+                    "\n\nRules:"
+                    "\n1. Use 'knowledge_base' for queries about 'how-to', 'what is', 'policy', 'introduce', or general knowledge."
+                    "\n2. Use 'metrics'/'logs' for system status checks (cpu, memory, error logs)."
+                    "\n3. AMBIGUITY CHECK: If the query is ambiguous (e.g., 'what is my system version?'), do NOT guess. "
+                    "Ask for clarification: 'Do you mean the Operating System version (use tools) or the Business System version (use knowledge base)?'. "
+                    "Set needs_clarification=True and provide a clarification_message in the user's language."
                 ),
             },
             {"role": "user", "content": query_text},
         ])
         if result is not None:
-            return {"query": query_text, "classifications": result.classifications}
+            if result.needs_clarification:
+                # Store the clarification message as final_answer directly in the state
+                # The state update here will be merged into the graph state
+                return {
+                    "query": query_text, 
+                    "classifications": [], 
+                    "final_answer": result.clarification_message
+                }
+            return {"query": query_text, "classifications": result.classifications, "final_answer": ""} # Clear final_answer if not needed
     except Exception as e:
         # Silently fail or log warning if needed, but for user experience we just fallback
         pass
@@ -138,7 +175,21 @@ def classify_query(state: RouterState, router_llm) -> dict:
     try:
         parser = JsonOutputParser(pydantic_object=ClassificationResult)
         prompt = PromptTemplate(
-            template="You are a helpful AIOps assistant.\nAnalyze the query and decide which agents to call.\nReturn ONLY a valid JSON object matching the schema below.\nDo NOT include any markdown formatting (like ```json), explanations, or extra text.\n\nSchema:\n{format_instructions}\n\nQuery: {query}\n\nJSON Response:",
+            template=(
+                "You are a helpful AIOps assistant.\n"
+                "Analyze the query and decide which agents to call.\n"
+                "Return ONLY a valid JSON object matching the schema below.\n"
+                "Do NOT include any markdown formatting (like ```json), explanations, or extra text.\n\n"
+                "Schema:\n{format_instructions}\n\n"
+                "Query: {query}\n\n"
+                "Rules:\n"
+                "1. Use 'knowledge_base' for queries about 'how-to', 'what is', 'policy', 'introduce', or general knowledge.\n"
+                "2. Use 'metrics'/'logs' for system status checks (cpu, memory, error logs).\n"
+                "3. AMBIGUITY CHECK: If the query is ambiguous (e.g., 'what is my system version?'), do NOT guess. "
+                "Ask for clarification: 'Do you mean the Operating System version (use tools) or the Business System version (use knowledge base)?'. "
+                "Set needs_clarification=True and provide a clarification_message in the user's language.\n\n"
+                "JSON Response:"
+            ),
             input_variables=["query"],
             partial_variables={"format_instructions": parser.get_format_instructions()},
         )
@@ -151,6 +202,12 @@ def classify_query(state: RouterState, router_llm) -> dict:
         if isinstance(result, dict):
             # Try to validate with Pydantic model
             obj = ClassificationResult.model_validate(result)
+            if obj.needs_clarification:
+                return {
+                    "query": query_text, 
+                    "classifications": [], 
+                    "final_answer": obj.clarification_message
+                }
             return {"query": query_text, "classifications": obj.classifications}
     except Exception as e:
         print(f"Error: JSON fallback also failed. {e}")
@@ -191,7 +248,44 @@ def route_to_agents(state: RouterState) -> list[Send]:
     
     将任务分发给 metrics, logs, fault, security 等代理。
     """
-    enriched = _ensure_critical_agents(list(state["classifications"]), state["query"])
+    classifications = state.get("classifications", [])
+    
+    # Check if we have a direct final answer from classification (e.g. clarification)
+    # If so, we don't route to any agents, but we still need to end the workflow.
+    # However, LangGraph conditional edges must return valid nodes or END.
+    # If we return empty list, the graph might stop or error depending on configuration.
+    # But wait, if 'classify' node already set 'final_answer', we should probably route to END directly?
+    # The current graph structure is classify -> conditional_edge -> agents.
+    # If we return [], no agents are called. Then 'skill_orchestrate' is called in parallel?
+    # No, 'skill_orchestrate' is a separate parallel branch from 'classify'? 
+    # Let's look at the graph definition:
+    # .add_edge("skill_middleware_pre", "classify")
+    # .add_conditional_edges("classify", route_to_agents, [...])
+    # .add_edge("classify", "skill_orchestrate")
+    
+    # It seems 'classify' goes to 'skill_orchestrate' unconditionally via normal edge,
+    # AND to agents via conditional edge.
+    
+    # If we have a final answer (clarification), we should probably avoid calling agents.
+    # So returning [] is correct for the agents part.
+    # But 'skill_orchestrate' will still run. That might be okay, or we might want to prevent it.
+    
+    if not classifications:
+        # Check if we have a final answer (clarification) set in the state by 'classify' node
+        # But wait, conditional_edges receives 'state' as argument.
+        # So we can check state['final_answer'] here.
+        if state.get("final_answer"):
+            # Return a valid destination that does nothing or goes to end.
+            # We can route to 'synthesize' which will just return the final answer.
+            # Or we can return [] and let the graph logic handle it (but it seems to continue to orchestrate).
+            # The cleanest way in current graph structure (classify -> skill_orchestrate)
+            # is to just let it flow. The agents won't be called.
+            # 'skill_orchestrate' will run (harmless).
+            # Then 'synthesize' will run.
+            return []
+        return []
+
+    enriched = _ensure_critical_agents(list(classifications), state["query"])
     return [Send(item["source"], {"query": item["query"]}) for item in enriched]
 
 
@@ -242,7 +336,8 @@ def knowledge_base_node(state: AgentInput, knowledge_agent, vector_store, llm) -
     query_text = _normalize_query(state.get("query"))
     
     # 1. 检索
-    docs = vector_store.similarity_search(query_text, k=3)
+    # Increase k for better recall
+    docs = vector_store.similarity_search(query_text, k=6)
     context = "\n\n".join([f"Document {i+1}:\n{doc.page_content}" for i, doc in enumerate(docs)])
     
     if not docs:
@@ -256,6 +351,7 @@ def knowledge_base_node(state: AgentInput, knowledge_agent, vector_store, llm) -
         "Do NOT make up answers (hallucinate). "
         "Do NOT use outside knowledge. "
         "Keep your answers concise and polite."
+        "When answering, please try to extract relevant information from the context as much as possible, rather than strictly matching keywords."
     )
     
     messages = [
@@ -281,10 +377,27 @@ def synthesize_results(state: RouterState, router_llm) -> dict:
         state: 包含所有代理执行结果(results)的状态
         router_llm: 用于生成的 LLM
     """
+    # Check if we already have a final answer (e.g. clarification from classify node)
+    if state.get("final_answer") and state["final_answer"].strip():
+        return {"final_answer": state["final_answer"]}
+
     if not state["results"]:
         return {"final_answer": "No results found from any AIOps agent."}
 
     query_text = _normalize_query(state.get("query"))
+
+    # Special handling for knowledge_base to prevent hallucinations
+    # If knowledge base is the only source and it explicitly says it doesn't know, 
+    # return that directly without synthesis.
+    if len(state["results"]) == 1 and state["results"][0]["source"] == "knowledge_base":
+        res = state["results"][0]["result"]
+        try:
+            gate = IntentAgent(router_llm).gate_synthesis(query_text, res)
+            if not gate.needs_synthesis:
+                return {"final_answer": (gate.response or res)}
+        except Exception:
+            pass
+
     formatted = [
         f"From {item['source'].title()}:\n{item['result']}"
         for item in state["results"]
@@ -295,7 +408,10 @@ def synthesize_results(state: RouterState, router_llm) -> dict:
             "content": (
                 f"Synthesize these results to answer the original question: \"{query_text}\". "
                 "Combine findings, highlight anomalies, and provide actionable next steps. "
-                "If there is a 'knowledge_base' result, ensure it is the primary source for 'how-to' or general knowledge questions."
+                "If there is a 'knowledge_base' result, ensure it is the primary source for 'how-to' or general knowledge questions. "
+                "CRITICAL: If the provided knowledge base result indicates it cannot answer (e.g., 'I don't know', 'not mentioned', 'no information'), "
+                "and no other agent provided relevant info, you MUST admit you don't know and return that negative response directly. "
+                "Do NOT fabricate an answer, do NOT offer general advice unrelated to the specific question context."
             ),
         },
         {"role": "user", "content": "\n\n".join(formatted)},
@@ -345,6 +461,8 @@ def build_workflow(llm, router_llm):
 
     graph = (
         StateGraph(RouterState)
+        .add_node("skill_middleware_pre", skill_integration_middleware)
+        .add_node("intent_check", lambda state: intent_check_node(state, router_llm))
         .add_node("classify", lambda state: classify_query(state, router_llm))
         .add_node("skill_orchestrate", skill_orchestration_node)
         .add_node("metrics", make_query_node(metrics_agent, "metrics"))
@@ -353,7 +471,10 @@ def build_workflow(llm, router_llm):
         .add_node("security", make_query_node(security_agent, "security"))
         .add_node("knowledge_base", lambda state: knowledge_base_node(state, knowledge_agent, vector_store, llm))
         .add_node("synthesize", lambda state: synthesize_results(state, router_llm))
-        .add_edge(START, "classify")
+        .add_node("skill_middleware_post", lambda state: skill_solidification_middleware(state, state))
+        .add_edge(START, "skill_middleware_pre")
+        .add_edge("skill_middleware_pre", "intent_check")
+        .add_edge("intent_check", "classify")
         .add_conditional_edges("classify", route_to_agents, ["metrics", "logs", "fault", "security", "knowledge_base"])
         .add_edge("classify", "skill_orchestrate")
         .add_edge("metrics", "synthesize")
@@ -362,7 +483,8 @@ def build_workflow(llm, router_llm):
         .add_edge("security", "synthesize")
         .add_edge("knowledge_base", "synthesize")
         .add_edge("skill_orchestrate", "synthesize")
-        .add_edge("synthesize", END)
+        .add_edge("synthesize", "skill_middleware_post")
+        .add_edge("skill_middleware_post", END)
     )
     return graph.compile()
 
@@ -383,13 +505,11 @@ def build_default_workflow():
     llm_model = os.getenv("LLM_MODEL", "gpt-4o")
     llm_key = os.getenv("LITELLM_API_KEY","")
     llm_base = os.getenv("LITELLM_API_BASE","")
-    print(f"LLM Model: {llm_model}, API Key: {llm_key}, API Base: {llm_base}")
-    llm = ChatLiteLLM(model=llm_model, temperature=0, timeout=30, api_key=llm_key, api_base=llm_base, max_tokens=4096)
+    llm = ChatLiteLLM(model=llm_model, temperature=0, timeout=30, api_key=llm_key, api_base=llm_base, max_tokens=4096,custom_llm_provider="openai",api_version="2024-10-21")
     
     # Router LLM for classification (faster, cheaper)
     router_llm_model = os.getenv("ROUTER_LLM_MODEL", "gpt-4o-mini")
-    router_llm = ChatLiteLLM(model=router_llm_model, temperature=0, timeout=30, api_key=llm_key, api_base=llm_base, max_tokens=4096)
-    print(f"Router LLM Model: {router_llm_model}, API Key: {llm_key}, API Base: {llm_base}")
+    router_llm = ChatLiteLLM(model=router_llm_model, temperature=0, timeout=30, api_key=llm_key, api_base=llm_base, max_tokens=4096,custom_llm_provider="openai",api_version="2024-10-21")
     return build_workflow(llm, router_llm)
 
 

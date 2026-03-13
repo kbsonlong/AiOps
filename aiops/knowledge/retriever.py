@@ -24,9 +24,15 @@ class KnowledgeRetriever:
             search_kwargs: Additional arguments for the search (e.g. k, score_threshold).
         """
         self.vector_store_manager = vector_store_manager
+        
+        # Use a more generous k by default for better recall
+        default_kwargs = {"k": 6}
+        if search_kwargs:
+            default_kwargs.update(search_kwargs)
+            
         self.retriever = vector_store_manager.as_retriever(
             search_type=search_type,
-            search_kwargs=search_kwargs or {"k": 4}
+            search_kwargs=default_kwargs
         )
 
     def invoke(self, query: str) -> List[Document]:
