@@ -48,16 +48,16 @@ class DummyCommands:
         return None
 
 
-class TestWorkflowMiddlewareIntegrationStage2Task4(unittest.TestCase):
-    def test_skill_middleware_pre_node_uses_chain(self) -> None:
+class TestWorkflowMiddlewareIntegrationStage2Task4(unittest.IsolatedAsyncioTestCase):
+    async def test_skill_middleware_pre_node_uses_chain(self) -> None:
         node = make_skill_middleware_pre_node()
         with patch("aiops.workflows.skill_middleware.get_skill_commands_manager", return_value=DummyCommands()):
-            update = node({"query": "/demo run it", "context": {}})
+            update = await node({"query": "/demo run it", "context": {}})
         self.assertIn("DEMO CONTENT", update["query"])
         self.assertTrue(update["context"]["skill_invoked"])
         self.assertNotIn("results", update)
 
-    def test_synthesize_node_applies_post_middleware(self) -> None:
+    async def test_synthesize_node_applies_post_middleware(self) -> None:
         router_llm = MagicMock()
         router_llm.invoke = MagicMock(return_value=MagicMock(content="1. a\n2. b\n3. c\n4. d\n5. e\n"))
         node = make_synthesize_with_middlewares_node(router_llm)
@@ -68,7 +68,7 @@ class TestWorkflowMiddlewareIntegrationStage2Task4(unittest.TestCase):
             "final_answer": "",
         }
         with patch("aiops.workflows.skill_middleware._auto_create_skill", return_value=False):
-            update = node(state)
+            update = await node(state)
         self.assertIn("系统提示", update["final_answer"])
         self.assertNotIn("results", update)
 

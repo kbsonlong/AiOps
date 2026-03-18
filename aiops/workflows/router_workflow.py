@@ -3,6 +3,7 @@ import os
 import json
 import asyncio
 import operator
+import time
 from typing import Annotated, Literal, TypedDict, Optional, cast
 
 from langchain_litellm import ChatLiteLLM
@@ -12,6 +13,7 @@ from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import PromptTemplate
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
+import openai
 from pydantic import BaseModel, Field
 
 from aiops.agents import (
@@ -30,6 +32,7 @@ from aiops.skills.global_registry import get_global_skill_registry
 from aiops.workflows.skill_middleware import get_skill_post_middleware_chain, get_skill_pre_middleware_chain
 from aiops.core.error_handler import get_logger, log_exception, safe_execute
 from aiops.exceptions import AgentException, ConfigException
+from aiops.core.classification_metrics import get_metrics
 
 
 Severity = Literal["low", "medium", "high", "critical"]
@@ -119,52 +122,223 @@ def _normalize_query(raw) -> str:
     return text.strip() if text else ""
 
 def _classify_fallback(query_text: str) -> list[Classification]:
+    """关键词匹配降级分类函数。
+
+    当 LLM 调用失败时使用此函数进行基于规则的快速分类。
+    支持中英文混合查询，覆盖常见运维场景。
+    """
     lowered = query_text.lower()
-    if any(k in lowered for k in ("log", "日志", "error", "exception", "panic", "fatal")):
+
+    # 安全相关关键词 (高优先级检查)
+    security_keywords = [
+        "漏洞", "入侵", "攻击", "安全", "暴力破解", "ssh", "爆破",
+        "auth", "permission", "403", "401", "unauthorized", "forbidden",
+        "注入", "xss", "csrf", "malware", "virus", "trojan", "backdoor",
+        "防火墙", "隔离", "加密", "证书", "密钥", "权限", "登录",
+        "firewall", "acl", "vpn", "waf", "ids", "ips"
+    ]
+    if any(k in lowered for k in security_keywords):
+        severity = "high" if any(k in lowered for k in ["入侵", "攻击", "暴力破解", "注入", "malware"]) else "medium"
+        return [{"source": "security", "query": query_text, "severity": severity}]
+
+    # 故障诊断关键词
+    fault_keywords = [
+        "诊断", "故障", "根因", "分析", "异常", "崩溃", "挂起", "卡死",
+        "慢", "超时", "timeout", "crash", "hang", "stuck", "freeze",
+        "不通", "连接失败", "拒绝", "不可用", "down", "offline"
+    ]
+    if any(k in lowered for k in fault_keywords):
+        severity = "high" if any(k in lowered for k in ["崩溃", "crash", "超时", "timeout", "不可用"]) else "medium"
+        return [{"source": "fault", "query": query_text, "severity": severity}]
+
+    # 日志相关关键词
+    logs_keywords = [
+        "log", "日志", "error", "exception", "panic", "fatal", "warning",
+        "warn", "trace", "debug", "stderr", "stdout", "stacktrace"
+    ]
+    if any(k in lowered for k in logs_keywords):
         return [{"source": "logs", "query": query_text, "severity": "medium"}]
-    if any(k in lowered for k in ("cpu", "内存", "memory", "disk", "磁盘", "network", "网络", "prometheus", "metrics", "指标")):
+
+    # 监控指标相关关键词
+    metrics_keywords = [
+        "cpu", "内存", "memory", "disk", "磁盘", "network", "网络",
+        "prometheus", "指标", "metrics", "负载", "load", "使用率",
+        "带宽", "延迟", "latency", "qps", "tps", "吞吐", "throughput"
+    ]
+    if any(k in lowered for k in metrics_keywords):
         return [{"source": "metrics", "query": query_text, "severity": "medium"}]
-    if any(k in lowered for k in ("漏洞", "入侵", "攻击", "安全", "auth", "permission", "403", "401", "unauthorized")):
-        return [{"source": "security", "query": query_text, "severity": "high"}]
+
+    # 默认路由到知识库
     return [{"source": "knowledge_base", "query": query_text, "severity": "low"}]
 
 def classify_query(state: RouterState, router_llm) -> dict:
     """
     路由分类节点：分析用户查询意图，决定需要调用的 AIOps 代理。
 
+    使用 LLM (qwen2.5:3b) 进行智能意图分类，支持中英文混合查询。
+    包含降级机制：LLM 调用失败时使用关键词匹配。
+
+    集成统计追踪功能，记录 LLM 调用和 fallback 次数。
+
     Args:
         state: 当前路由状态，包含原始查询
-        router_llm: 用于分类的 LLM 模型
+        router_llm: 用于分类的 LLM 模型 (推荐 qwen2.5:3b)
 
     Returns:
         dict: 更新后的状态，包含分类结果列表
     """
+    metrics = get_metrics()
     query_text = _normalize_query(state.get("query"))
 
-    # Simple keyword-based classification to avoid LLM timeout issues
-    lowered = query_text.lower()
-
-    # Check for metrics-related keywords
-    metrics_keywords = ["cpu", "内存", "memory", "disk", "磁盘", "network", "网络", "prometheus", "指标", "metrics", "负载", "load"]
-    if any(k in lowered for k in metrics_keywords):
-        return {
-            "query": query_text,
-            "classifications": [{"source": "metrics", "query": query_text, "severity": "medium"}]
+    # 构建结构化分类提示词
+    classification_prompt = [
+        {
+            "role": "system",
+            "content": (
+                "你是一个 AIOps 系统的智能路由分类器。你的任务是分析用户查询，"
+                "将其分类到合适的专业代理，并识别严重程度和用户意图。\n\n"
+                "**可用的代理类型:**\n"
+                "- metrics: 系统指标相关 (CPU、内存、磁盘、网络、负载、Prometheus、监控指标)\n"
+                "- logs: 日志相关 (错误日志、异常、panic、fatal、警告、日志分析)\n"
+                "- fault: 故障诊断 (根因分析、故障定位、系统异常诊断)\n"
+                "- security: 安全相关 (漏洞、入侵、攻击、权限、认证、403/401)\n"
+                "- knowledge_base: 通用知识查询 (文档、概念、操作指南、一般性问题)\n\n"
+                "**严重程度:**\n"
+                "- critical: 系统完全不可用、数据丢失、安全漏洞被利用\n"
+                "- high: 服务严重降级、重大功能异常、明显性能问题\n"
+                "- medium: 轻微功能问题、性能警告、需要关注的问题\n"
+                "- low: 咨询类问题、信息查询、预防性检查\n\n"
+                "**用户意图:**\n"
+                "- consultation: 咨询类 (请求信息、解释、文档、概念定义)\n"
+                "- operation: 操作类 (执行动作、检查状态、诊断、分析、故障排除)\n\n"
+                "**输出格式:** 必须严格返回有效的 JSON 对象，不要包含任何额外文本或 markdown 格式:\n"
+                '{\n'
+                '  "classifications": [\n'
+                '    {"source": "代理类型", "query": "针对该代理的子查询", "severity": "严重程度"}\n'
+                '  ],\n'
+                '  "needs_clarification": false,\n'
+                '  "clarification_message": "",\n'
+                '  "user_intent": "consultation 或 operation",\n'
+                '  "user_language": "zh 或 en 或 other"\n'
+                '}'
+            )
+        },
+        {
+            "role": "user",
+            "content": f"请分类以下查询（支持中英文）:\n\n查询: {query_text}\n\n返回 JSON 对象:"
         }
+    ]
 
-    # Check for logs-related keywords
-    logs_keywords = ["log", "日志", "error", "exception", "panic", "fatal", "warning"]
-    if any(k in lowered for k in logs_keywords):
-        return {
-            "query": query_text,
-            "classifications": [{"source": "logs", "query": query_text, "severity": "medium"}]
-        }
+    # 尝试 LLM 分类，同时记录指标
+    llm_start_time = None
+    try:
+        llm_start_time = time.perf_counter()
+        response = router_llm.invoke(classification_prompt)
+        llm_latency_ms = (time.perf_counter() - llm_start_time) * 1000
 
-    # Default to knowledge_base
-    return {
-        "query": query_text,
-        "classifications": [{"source": "knowledge_base", "query": query_text, "severity": "low"}]
-    }
+        # 记录 LLM 调用成功
+        metrics._record_llm_call_end(llm_start_time, success=True)
+
+        response_text = _coerce_text(response.content)
+
+        # 尝试解析 JSON 响应
+        try:
+            # 清理可能的 markdown 代码块标记
+            cleaned_response = response_text.strip()
+            if cleaned_response.startswith("```json"):
+                cleaned_response = cleaned_response[7:]
+            if cleaned_response.startswith("```"):
+                cleaned_response = cleaned_response[3:]
+            if cleaned_response.endswith("```"):
+                cleaned_response = cleaned_response[:-3]
+            cleaned_response = cleaned_response.strip()
+
+            result = json.loads(cleaned_response)
+
+            # 验证并返回分类结果
+            if isinstance(result, dict) and "classifications" in result:
+                classifications = result["classifications"]
+
+                # 验证分类格式
+                valid_sources = {"metrics", "logs", "fault", "security", "knowledge_base"}
+                valid_severities = {"low", "medium", "high", "critical"}
+
+                primary_classification = None
+                for cls in classifications:
+                    if cls.get("source") not in valid_sources:
+                        cls["source"] = "knowledge_base"
+                    if cls.get("severity") not in valid_severities:
+                        cls["severity"] = "medium"
+                    if "query" not in cls or not cls["query"]:
+                        cls["query"] = query_text
+
+                    # 记录主分类到指标
+                    if primary_classification is None:
+                        primary_classification = (cls["source"], cls["severity"])
+
+                # 记录 LLM 成功分类
+                if primary_classification:
+                    source, severity = primary_classification
+                    metrics.record_success(
+                        query=query_text[:200],  # 限制查询长度
+                        source=source,
+                        severity=severity,
+                        method="llm",
+                        llm_latency_ms=llm_latency_ms,
+                    )
+
+                return {
+                    "query": query_text,
+                    "classifications": classifications
+                }
+
+        except json.JSONDecodeError as e:
+            # JSON 解析失败，降级到关键词匹配
+            error_reason = f"JSON解析失败: {str(e)[:100]}"
+            get_logger().warning(
+                "classify_query",
+                extra={"error": error_reason, "response": response_text[:200]}
+            )
+            metrics.record_fallback(query_text[:200], error_reason)
+
+            fallback_result = _classify_fallback(query_text)
+            # 记录 fallback 结果
+            if fallback_result:
+                metrics.record_success(
+                    query=query_text[:200],
+                    source=fallback_result[0]["source"],
+                    severity=fallback_result[0]["severity"],
+                    method="fallback",
+                )
+            return {"query": query_text, "classifications": fallback_result}
+
+    except Exception as e:
+        # LLM 调用失败，使用关键词匹配降级
+        error_reason = f"LLM调用异常: {type(e).__name__}: {str(e)[:100]}"
+        get_logger().warning(
+            "classify_query",
+            extra={"error": error_reason, "fallback": "keyword_matching"}
+        )
+
+        # 记录 LLM 调用失败（如果之前成功记录了开始时间）
+        if llm_start_time is not None:
+            metrics._record_llm_call_end(llm_start_time, success=False)
+        else:
+            metrics._llm_calls_total += 1
+            metrics._llm_failures += 1
+
+        metrics.record_fallback(query_text[:200], error_reason)
+
+        fallback_result = _classify_fallback(query_text)
+        # 记录 fallback 结果
+        if fallback_result:
+            metrics.record_success(
+                query=query_text[:200],
+                source=fallback_result[0]["source"],
+                severity=fallback_result[0]["severity"],
+                method="fallback",
+            )
+        return {"query": query_text, "classifications": fallback_result}
 
 
 def _ensure_critical_agents(
@@ -367,8 +541,8 @@ def synthesize_results(state: RouterState, router_llm) -> dict:
 def make_skill_middleware_pre_node():
     chain = get_skill_pre_middleware_chain()
 
-    def node(state: RouterState) -> dict:
-        updated = chain.run(state)
+    async def node(state: RouterState) -> dict:
+        updated = await chain.arun(state)
         update: dict = {}
         if updated.get("query") != state.get("query"):
             update["query"] = updated.get("query")
@@ -386,8 +560,8 @@ def make_synthesize_with_middlewares_node(router_llm):
         update = synthesize_results(state, router_llm)
         return {**state, **update}
 
-    def node(state: RouterState) -> dict:
-        final_state = chain.run(state, terminal=terminal)
+    async def node(state: RouterState) -> dict:
+        final_state = await chain.arun(state, terminal=terminal)
         update: dict = {"final_answer": final_state.get("final_answer", "")}
         if "context" in final_state:
             update["context"] = final_state.get("context", {})
@@ -483,11 +657,15 @@ def build_workflow(llm, router_llm, settings=None):
 def build_default_workflow():
     """
     Build the default workflow using LiteLLM for multi-provider support.
-    
-    You can switch providers by changing the model name, e.g.:
+
+    默认使用 qwen2.5 系列模型实现意图识别优化:
+    - ROUTER_LLM_MODEL: qwen2.5:3b (快速意图识别和分类)
+    - LLM_MODEL: qwen2.5:7b (复杂任务: 合成、代理执行)
+
+    你可以通过环境变量切换模型:
     - OpenAI: "gpt-4o", "gpt-4o-mini"
     - Anthropic: "claude-3-opus-20240229"
-    - Ollama: "ollama/llama3"
+    - Ollama: "ollama/llama3", "ollama/qwen2.5:3b"
     - Azure: "azure/gpt-4"
     """
     settings = load_settings()
@@ -495,15 +673,48 @@ def build_default_workflow():
     if not validation.valid:
         raise ConfigException(validation.to_message())
 
-    # Main LLM for complex tasks (synthesis, agent execution)
-    llm_model = os.getenv("LLM_MODEL", "gpt-4o")
-    llm_key = os.getenv("LITELLM_API_KEY","")
-    llm_base = os.getenv("LITELLM_API_BASE","")
-    llm = ChatLiteLLM(model=llm_model, temperature=0, timeout=30, api_key=llm_key, api_base=llm_base, max_tokens=4096)
+    # 从环境变量获取配置
+    llm_key = os.getenv("LITELLM_API_KEY", "")
+    llm_base = os.getenv("LITELLM_API_BASE", "")
 
-    # Router LLM for classification (faster, cheaper)
-    router_llm_model = os.getenv("ROUTER_LLM_MODEL", "gpt-4o-mini")
-    router_llm = ChatLiteLLM(model=router_llm_model, temperature=0, timeout=30, api_key=llm_key, api_base=llm_base, max_tokens=4096)
+    # 主 LLM 用于复杂任务 (合成、代理执行)
+    llm_model = os.getenv("LLM_MODEL", "qwen3.5:9b")
+    llm = ChatLiteLLM(
+        model=llm_model,
+        temperature=0,
+        timeout=30,
+        api_key=llm_key,
+        api_base=llm_base,
+        max_tokens=4096,
+        custom_llm_provider="openai"
+    )
+
+    # 路由 LLM 用于快速分类 (qwen2.5:3b 更小更快)
+    router_llm_model = os.getenv("ROUTER_LLM_MODEL", "qwen3.5:2b")
+    router_timeout = int(os.getenv("ROUTER_TIMEOUT", "15"))
+    router_max_tokens = int(os.getenv("ROUTER_MAX_TOKENS", "512"))
+    router_temperature = float(os.getenv("ROUTER_TEMPERATURE", "0"))
+
+    router_llm = ChatLiteLLM(
+        model=router_llm_model,
+        temperature=router_temperature,
+        timeout=router_timeout,
+        api_key=llm_key,
+        api_base=llm_base,
+        max_tokens=router_max_tokens,
+        custom_llm_provider="openai"
+    )
+
+    get_logger().info(
+        "build_default_workflow",
+        extra={
+            "llm_model": llm_model,
+            "router_llm_model": router_llm_model,
+            "router_timeout": router_timeout,
+            "router_max_tokens": router_max_tokens
+        }
+    )
+
     return build_workflow(llm, router_llm, settings=settings)
 
 
@@ -548,25 +759,49 @@ async def diagnosis_node(state: RouterState, metrics_agent, logs_agent, fault_ag
 def build_diagnosis_workflow():
     """
     构建一个专注于故障诊断的工作流，展示如何并行执行并汇总。
-    
+
+    使用 qwen2.5 系列模型优化:
+    - ROUTER_LLM_MODEL: qwen2.5:3b (快速意图识别和分类)
+    - LLM_MODEL: qwen2.5:7b (复杂任务: 合成、代理执行)
+
     这个 Workflow 强制执行诊断流程：
     1. Classify (决定是否需要诊断)
     2. Diagnosis Node (并行运行 Metrics + Logs -> Fault)
     3. Synthesize (最终格式化)
     """
-    # 从环境变量或默认值获取配置，因为 LangGraph Server 调用时不传参数
-    llm_model = os.getenv("LLM_MODEL", "gpt-4o")
+    # 从环境变量获取配置
     llm_key = os.getenv("LITELLM_API_KEY", "")
     llm_base = os.getenv("LITELLM_API_BASE", "")
-    router_llm_model = os.getenv("ROUTER_LLM_MODEL", "gpt-4o-mini")
-    
-    llm = ChatLiteLLM(model=llm_model, temperature=0, timeout=30, api_key=llm_key, api_base=llm_base, max_tokens=4096)
-    router_llm = ChatLiteLLM(model=router_llm_model, temperature=0, timeout=30, api_key=llm_key, api_base=llm_base, max_tokens=4096)
+
+    # 主 LLM 用于复杂任务
+    llm_model = os.getenv("LLM_MODEL", "ollama/qwen2.5:7b")
+    llm = ChatLiteLLM(
+        model=llm_model,
+        temperature=0,
+        timeout=30,
+        api_key=llm_key,
+        api_base=llm_base,
+        max_tokens=4096
+    )
+
+    # 路由 LLM 用于快速分类
+    router_llm_model = os.getenv("ROUTER_LLM_MODEL", "ollama/qwen2.5:3b")
+    router_timeout = int(os.getenv("ROUTER_TIMEOUT", "15"))
+    router_max_tokens = int(os.getenv("ROUTER_MAX_TOKENS", "512"))
+
+    router_llm = ChatLiteLLM(
+        model=router_llm_model,
+        temperature=0,
+        timeout=router_timeout,
+        api_key=llm_key,
+        api_base=llm_base,
+        max_tokens=router_max_tokens
+    )
 
     metrics_agent = build_metrics_agent().build(llm)
     logs_agent = build_logs_agent().build(llm)
     fault_agent = build_fault_agent().build(llm)
-    
+
     # 包装成无需参数的 callable
     async def run_diagnosis(state):
         return await diagnosis_node(state, metrics_agent, logs_agent, fault_agent)
@@ -576,11 +811,11 @@ def build_diagnosis_workflow():
         .add_node("classify", lambda state: classify_query(state, router_llm))
         .add_node("diagnosis", run_diagnosis)
         .add_node("synthesize", lambda state: synthesize_results(state, router_llm))
-        
+
         .add_edge(START, "classify")
         # 简单逻辑：如果分类器认为涉及 fault，则进入诊断流程，否则直接结束或走其他路径
         # 这里仅作演示，直接连接到 diagnosis
-        .add_edge("classify", "diagnosis") 
+        .add_edge("classify", "diagnosis")
         .add_edge("diagnosis", "synthesize")
         .add_edge("synthesize", END)
     )

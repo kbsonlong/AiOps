@@ -1,0 +1,270 @@
+# Agent 类型配置文件
+# 此文件定义了所有支持的 Agent 类型，支持动态扩展
+#
+# 添加新 Agent 的步骤：
+# 1. 在 agents 节点下添加新 Agent 定义
+# 2. 设置 enabled: false（初始状态）
+# 3. 收集训练数据并微调模型
+# 4. 灰度测试后设置 enabled: true
+
+agents:
+  # 系统指标监控 Agent
+  metrics:
+    name: metrics
+    display_name: "指标监控"
+    description: "CPU、内存、磁盘、网络等系统指标查询与分析"
+    enabled: true
+    keywords:
+      - cpu
+      - memory
+      - ram
+      - disk
+      - network
+      - bandwidth
+      - 指标
+      - 监控
+      - 使用率
+      - 占用
+      - load
+      - 负载
+    severity_levels: [low, medium, high, critical]
+    priority: 1
+    examples:
+      - "CPU 使用率很高，怎么办？"
+      - "查看内存占用情况"
+      - "磁盘空间还剩多少"
+      - "网络流量怎么样"
+      - "系统负载很高"
+
+  # 日志分析 Agent
+  logs:
+    name: logs
+    display_name: "日志分析"
+    description: "错误日志、异常堆栈、警告信息查询与分析"
+    enabled: true
+    keywords:
+      - log
+      - logs
+      - error
+      - exception
+      - warning
+      - warn
+      - 日志
+      - 错误
+      - 异常
+      - 堆栈
+      - trace
+      - stderr
+    severity_levels: [low, medium, high, critical]
+    priority: 2
+    examples:
+      - "查看错误日志"
+      - "最近有哪些异常"
+      - "最近的 warning 日志"
+      - "日志里有报错"
+      - "查看应用日志"
+
+  # 故障诊断 Agent
+  fault:
+    name: fault
+    display_name: "故障诊断"
+    description: "系统异常诊断、根因分析、故障排查与定位"
+    enabled: true
+    keywords:
+      - 诊断
+      - 根因
+      - 异常
+      - 崩溃
+      - 故障
+      - 排查
+      - 定位
+      - crash
+      - down
+      - outage
+      - incident
+    severity_levels: [low, medium, high, critical]
+    priority: 3
+    examples:
+      - "系统为什么崩溃了"
+      - "帮我分析一下故障"
+      - "找出问题的根本原因"
+      - "服务异常了，帮我看看"
+      - "怎么定位这个问题"
+
+  # 安全检查 Agent
+  security:
+    name: security
+    display_name: "安全检查"
+    description: "安全漏洞扫描、入侵检测、权限审计与合规检查"
+    enabled: true
+    keywords:
+      - 安全
+      - 漏洞
+      - 入侵
+      - 权限
+      - 攻击
+      - 审计
+      - 合规
+      - vuln
+      - vulnerability
+      - exploit
+      - permission
+      - auth
+    severity_levels: [low, medium, high, critical]
+    priority: 4
+    examples:
+      - "检查安全漏洞"
+      - "有没有异常登录"
+      - "权限配置有问题吗"
+      - "安全审计报告"
+      - "检测到攻击了吗"
+
+  # 知识库查询 Agent
+  knowledge_base:
+    name: knowledge_base
+    display_name: "知识库"
+    description: "通用运维知识查询、文档检索、最佳实践推荐"
+    enabled: true
+    keywords: []
+    severity_levels: [low, medium, high, critical]
+    priority: 99  # 兜底 Agent
+    examples:
+      - "如何配置监控"
+      - "部署文档在哪里"
+      - "运维手册"
+      - "最佳实践是什么"
+      - "有什么推荐方案"
+
+  # ========== 未来扩展 Agent（已预留配置）==========
+
+  # 成本分析 Agent（待实现）
+  cost:
+    name: cost
+    display_name: "成本分析"
+    description: "云资源成本分析、费用优化建议、预算管理"
+    enabled: false  # 暂未启用
+    keywords:
+      - 成本
+      - 费用
+      - 预算
+      - 优化
+      - cost
+      - pricing
+      - bill
+      - 节省
+    severity_levels: [low, medium, high]
+    priority: 6
+    examples:
+      - "这个月费用多少"
+      - "怎么降低成本"
+      - "资源开销分析"
+      - "预算使用情况"
+
+  # 性能调优 Agent（待实现）
+  performance:
+    name: performance
+    display_name: "性能调优"
+    description: "系统性能分析与优化建议、瓶颈识别"
+    enabled: false  # 暂未启用
+    keywords:
+      - 性能
+      - 优化
+      - 加速
+      - 瓶颈
+      - performance
+      - optimize
+      - speed
+      - latency
+      - slow
+    severity_levels: [low, medium, high]
+    priority: 7
+    examples:
+      - "系统响应很慢"
+      - "如何优化性能"
+      - "有性能瓶颈吗"
+      - "延迟很高"
+
+  # 备份恢复 Agent（待实现）
+  backup:
+    name: backup
+    display_name: "备份恢复"
+    description: "数据备份管理、恢复操作、备份策略配置"
+    enabled: false  # 暂未启用
+    keywords:
+      - 备份
+      - 恢复
+      - backup
+      - restore
+      - snapshot
+    severity_levels: [low, medium, high, critical]
+    priority: 8
+    examples:
+      - "执行数据备份"
+      - "恢复到昨天"
+      - "备份策略"
+      - "有快照吗"
+
+  # 部署发布 Agent（待实现）
+  deployment:
+    name: deployment
+    display_name: "部署发布"
+    description: "应用部署管理、发布控制、回滚操作"
+    enabled: false  # 暂未启用
+    keywords:
+      - 部署
+      - 发布
+      - deploy
+      - release
+      - rollout
+      - 回滚
+      - rollback
+      - version
+    severity_levels: [low, medium, high, critical]
+    priority: 9
+    examples:
+      - "部署新版本"
+      - "回滚到上一版"
+      - "发布状态"
+      - "当前版本号"
+
+  # 容量规划 Agent（待实现）
+  capacity:
+    name: capacity
+    display_name: "容量规划"
+    description: "资源容量评估、扩容建议、容量预测"
+    enabled: false  # 暂未启用
+    keywords:
+      - 容量
+      - 扩容
+      - capacity
+      - scale
+      - 扩展
+      - 资源规划
+    severity_levels: [low, medium, high]
+    priority: 10
+    examples:
+      - "需要扩容吗"
+      - "容量评估"
+      - "资源够用吗"
+      - "什么时候扩容"
+
+# 模型配置映射
+models:
+  # 当前生产模型
+  v1.0:
+    type: base
+    path: "ollama/qwen2.5:3b"
+    supported_agents: [metrics, logs, fault, security, knowledge_base]
+    num_labels: 20  # 5 agents × 4 severities
+
+  # LoRA 微调模型（待训练）
+  v2.0:
+    type: lora
+    path: "models/intent_lora_v2.0"
+    supported_agents: [metrics, logs, fault, security, knowledge_base]
+    num_labels: 20
+    base_model: "ollama/qwen2.5:3b"
+
+# 配置版本
+config_version: "1.0"
+last_updated: "2026-03-18"
