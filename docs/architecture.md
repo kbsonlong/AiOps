@@ -1,0 +1,728 @@
+# AIOps 项目架构文档
+
+> 更新时间：2025-03-20
+> 版本：v2.0
+
+## 目录
+
+1. [系统概述](#系统概述)
+2. [整体架构](#整体架构)
+3. [核心组件](#核心组件)
+4. [工作流系统](#工作流系统)
+5. [Agent系统](#agent系统)
+6. [Skills技能系统](#skills技能系统)
+7. [任务分解与编排](#任务分解与编排)
+8. [数据层](#数据层)
+9. [事件系统](#事件系统)
+10. [配置管理](#配置管理)
+11. [部署架构](#部署架构)
+
+---
+
+## 系统概述
+
+AIOps 项目是一个基于 LangGraph 的多代理智能运维系统，采用**路由-聚合模式**实现查询分类、专业代理分发和结果合成。
+
+### 核心特性
+
+- **多代理协作**：Metrics、Logs、Fault、Security、KnowledgeBase 五大专业 Agent
+- **智能路由**：基于 LLM 的查询分类和路由决策
+- **技能扩展**：动态技能发现、组合和执行（Agent Skills 规范）
+- **任务编排**：复杂任务自动分解与依赖感知执行
+- **事件驱动**：全面的事件总线支持进度追踪和监控
+
+### 技术栈
+
+| 组件 | 技术选型 |
+|------|---------|
+| 工作流引擎 | LangGraph |
+| LLM 框架 | LangChain + LiteLLM |
+| 图计算 | NetworkX |
+| 数据验证 | Pydantic |
+| 配置管理 | YAML + Pydantic Settings |
+
+---
+
+## 整体架构
+
+### 系统分层
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        应用层 (Application)                      │
+├─────────────────────────────────────────────────────────────────┤
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐  │
+│  │  Web UI │ │   CLI   │ │   API   │ │ Notify  │ │ Health  │  │
+│  └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                       工作流层 (Workflows)                       │
+├─────────────────────────────────────────────────────────────────┤
+│  ┌───────────────────┐  ┌────────────────────────────────────┐ │
+│  │  Router Workflow  │  │    Task Decomposition &           │ │
+│  │  - Classify       │  │    Orchestration System           │ │
+│  │  - Route          │  │    - TaskDecomposer               │ │
+│  │  - Synthesize     │  │    - TaskOrchestrator             │ │
+│  └───────────────────┘  └────────────────────────────────────┘ │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │              Middleware Chain (Pre/Post)                  │  │
+│  └──────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                        Agent层 (Agents)                          │
+├─────────────────────────────────────────────────────────────────┤
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ │
+│  │ Metrics │ │  Logs   │ │  Fault  │ │Security │ │Knowledge│ │
+│  │ Agent   │ │ Agent   │ │ Agent   │ │ Agent   │ │  Agent  │ │
+│  └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘ │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │              Intent Agent (意图识别)                       │ │
+│  └───────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                       技能层 (Skills)                            │
+├─────────────────────────────────────────────────────────────────┤
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │              Agent Skills 子系统                          │   │
+│  │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐        │   │
+│  │  │   Registry  │ │  Discovery  │ │ Composition │        │   │
+│  │  └─────────────┘ └─────────────┘ └─────────────┘        │   │
+│  │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐        │   │
+│  │  │   Sandbox   │ │  Security   │ │  Versioning │        │   │
+│  │  └─────────────┘ └─────────────┘ └─────────────┘        │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ��─────────┐             │
+│  │监控技能  │ │日志技能  │ │诊断技能  │ │安全技能  │ Library   │
+│  │ Library  │ │ Library  │ │ Library  │ │ Library  │             │
+│  └─────────┘ └─────────┘ └─────────┘ └─────────┘             │
+└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                        核心层 (Core)                             │
+├─────────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐              │
+│  │  EventBus   │ │ DI Container│ │ErrorHandler │              │
+│  └─────────────┘ └─────────────┘ └─────────────┘              │
+│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐              │
+│  │Cache Manager│ │Metrics Track│ │HTTP Pool    │              │
+│  └─────────────┘ └─────────────┘ └─────────────┘              │
+└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                      数据层 (Data Sources)                       │
+├─────────────────────────────────────────────────────────────────┤
+│  ┌─────────┐ ┌─────────────┐ ┌──────────────────┐              │
+│  │Prometheus│ │ VictoriaLogs│ │  Vector Store    │              │
+│  │(Metrics) │ │   (Logs)   │ │  (Knowledge)     │              │
+│  └─────────┘ └─────────────┘ └──────────────────┘              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 核心组件
+
+### 目录结构
+
+```
+aiops/
+├── agents/              # Agent 实现
+│   ├── base_agent.py
+│   ├── metrics_agent.py
+│   ├── logs_agent.py
+│   ├── fault_agent.py
+│   ├── security_agent.py
+│   ├── knowledge_agent.py
+│   └── intent_agent.py
+├── workflows/           # 工作流定义
+│   ├── router_workflow.py
+│   ├── complexity_analyzer.py
+│   ├── middleware_chain.py
+│   └── skill_middleware.py
+├── tasks/               # 任务分解与编排
+│   ├── models.py
+│   ├── decomposer.py
+│   ├── orchestrator.py
+│   └── events.py
+├── skills/              # 技能系统
+│   ├── models.py
+│   ├── registry.py
+│   ├── discovery.py
+│   ├── composition.py
+│   ├── runtime.py
+│   ├── sandbox.py
+│   └── security.py
+├── core/                # 核心组件
+│   ├── events.py
+│   ├── container.py
+│   ├── error_handler.py
+│   └── classification_metrics.py
+├── config/              # 配置管理
+│   ├── settings.py
+│   ├── cache_config.py
+│   └── skills_config.py
+├── cache/               # 缓存层
+│   ├── factory.py
+│   ├── memory_ttl.py
+│   └── redis_cache.py
+├── knowledge/           # 知识库
+│   ├── vector_store.py
+│   ├── processor.py
+│   └── retriever.py
+├── tools/               # 工具函数
+│   ├── metrics_tools.py
+│   ├── logs_tools.py
+│   ├── fault_tools.py
+│   └── security_tools.py
+├── api/                 # API 接口
+│   ├── skill_api.py
+│   └── health.py
+├── cli/                 # 命令行工具
+│   └── skill_cli.py
+└── utils/               # 工具类
+```
+
+---
+
+## 工作流系统
+
+### Router Workflow 核心流程
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                          START                                   │
+└──────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                    skill_middleware_pre                          │
+│                    (预处理中间件链)                               │
+└──────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                         classify                                 │
+│              (LLM 分类 + 意图识别 + 复杂度分析)                    │
+└──────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                      task_decompose                              │
+│               (任务复杂度分析与分解决策)                          │
+└──────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                    task_route_dispatch                           │
+│              (条件路由: Send 机制动态分发)                        │
+│           ┌────────────────┬───────────────────┐                │
+│           │  复杂任务       │    简单任务        │                │
+│           ▼                ▼                   ▼                │
+│      task_execute    metrics/logs/fault/  knowledge_base         │
+│                      security                                      │
+└──────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                       synthesize                                 │
+│                    (结果汇总与合成)                               │
+│              ┌──────────────────────────────┐                   │
+│              │      skill_middleware_post   │                   │
+│              │      (后处理中间件链)        │                   │
+│              └──────────────────────────────┘                   │
+└──────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                    skill_middleware_post                         │
+│                    (后处理中间件链)                               │
+└──────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                          END                                     │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### RouterState 状态定义
+
+```python
+class RouterState(TypedDict):
+    # 查询输入
+    query: str
+
+    # 分类结果
+    classifications: list[Classification]
+
+    # Agent 执行结果 (累加器)
+    results: Annotated[list[AgentOutput], operator.add]
+
+    # 最终答案
+    final_answer: str
+
+    # 上下文
+    context: dict
+
+    # 技能系统
+    detected_skills: list[dict]
+    skill_execution_plan: dict
+
+    # 知识库
+    knowledge_context: Optional[str]
+    knowledge_base_result: Optional[str]
+
+    # 任务分解与编排
+    task_decomposition: Optional[TaskDecompositionResult]
+    execution_plan: Optional[TaskExecutionPlan]
+```
+
+---
+
+## Agent系统
+
+### Agent 类型与职责
+
+| Agent | 职责 | 数据源 |
+|-------|------|--------|
+| **Metrics Agent** | 系统指标查询、趋势分析、容量预测 | Prometheus, OpenTelemetry |
+| **Logs Agent** | 日志查询、模式识别、异常检测 | VictoriaLogs, OpenTelemetry |
+| **Fault Agent** | 故障诊断、根因分析、影响评估 | 聚合多源数据 |
+| **Security Agent** | 安全扫描、漏洞检测、权限验证 | 安全工具、审计日志 |
+| **Knowledge Agent** | 知识库查询、文档检索、智能问答 | Vector Store (RAG) |
+| **Intent Agent** | 用户意图识别、查询重写、澄清引导 | LLM |
+
+### Agent 基类
+
+```python
+class BaseAgent:
+    """Agent 基类，定义通用接口"""
+
+    def build(self, llm) -> Agent:
+        """构建 LangChain Agent"""
+        pass
+
+    @abstractmethod
+    def get_system_prompt(self) -> str:
+        """获取系统提示词"""
+        pass
+
+    @abstractmethod
+    def get_tools(self) -> list[BaseTool]:
+        """获取可用工具列表"""
+        pass
+```
+
+### 分类与路由
+
+```python
+class ClassificationResult(TypedDict):
+    source: Source          # metrics, logs, fault, security, knowledge_base
+    query: str              # 针对该 Agent 的子查询
+    severity: Severity      # low, medium, high, critical
+    confidence: float       # 分类置信度
+
+def route_to_agents(state: RouterState) -> list[Send]:
+    """根据分类结果生成 Send 对象，实现动态路由"""
+    classifications = state["classifications"]
+    return [Send(c["source"], {"query": c["query"]}) for c in classifications]
+```
+
+---
+
+## Skills技能系统
+
+### Agent Skills 架构
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Agent Skills 子系统                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
+│  │  Discovery  │───▶│  Registry   │◀───│  Manager    │         │
+│  │  Service    │    │  (Global)   │    │             │         │
+│  └─────────────┘    └─────────────┘    └─────────────┘         │
+│         │                   │                                   │
+│         ▼                   ▼                                   │
+│  ┌─────────────┐    ┌─────────────┐                            │
+│  │ Composition │    │  Runtime    │                            │
+│  │   Engine    │───▶│  Executor   │                            │
+│  └─────────────┘    └─────────────┘                            │
+│         │                   │                                   │
+│         ▼                   ▼                                   │
+│  ┌─────────────┐    ┌─────────────┐                            │
+│  │   Sandbox   │    │  Security   │                            │
+│  │  Enhanced   │    │  Guard      │                            │
+│  └─────────────┘    └─────────────┘                            │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 技能定义模型
+
+```python
+class SkillDefinition(BaseModel):
+    """技能定义模型"""
+    id: str                          # 唯一标识
+    name: str                        # 技能名称
+    category: SkillCategory          # 分类
+    description: str                 # 描述
+    risk_level: SkillRiskLevel       # 风险等级
+    dependencies: list[str]          # 依赖技能
+    metadata: dict[str, Any]         # 元数据
+
+class SkillCompositionEngine:
+    """技能组合引擎 - 使用 NetworkX 计算依赖图"""
+
+    def build_execution_plan(
+        self,
+        skills: list[SkillDefinition],
+        context: dict | None = None
+    ) -> SkillExecutionPlan:
+        """构建执行计划，支持并行执行"""
+```
+
+### 技能类别
+
+| 类别 | 描述 | 示例 |
+|------|------|------|
+| `MONITORING` | 监控数据采集 | CPU/内存查询、指标趋势分析 |
+| `DIAGNOSIS` | 诊断分析 | 日志分析、错误追踪 |
+| `REMEDIATION` | 故障修复 | 服务重启、配置调整 |
+| `NOTIFICATION` | 通知发送 | 告警通知、状态更新 |
+| `SECURITY` | 安全操作 | 漏洞扫描、权限验证 |
+| `KNOWLEDGE` | 知识查询 | 文档检索、FAQ 问答 |
+
+---
+
+## 任务分解与编排
+
+### 系统架构
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Task Decomposition & Orchestration System           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  用户查询 ──▶ 复杂度分析 ──▶ 分解决策                             │
+│                  (heuristic + LLM)                               │
+│                                                                  │
+│      ┌────────────────┬───────────────────┐                     │
+│      │  简单查询       │    复杂查询        │                     │
+│      ▼                ▼                   ▼                     │
+│  直接路由        TaskDecomposer      TaskOrchestrator          │
+│  到 Agents      (LLM 分解)        (依赖图编排)                  │
+│                      │                   │                     │
+│                      ▼                   ▼                     │
+│              SubTask 列表        执行计划                        │
+│              - ID                 - 执行层                      │
+│              - 标题               - 并行组                      │
+│              - 依赖               - 时间估算                    │
+│              - Agent 类型                                      │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 核心组件
+
+#### 1. TaskDecomposer
+
+```python
+class TaskDecomposer:
+    """任务分解器 - 使用 LLM 分析并分解复杂任务"""
+
+    async def decompose(self, state: RouterState) -> TaskDecompositionResult:
+        """
+        分解流程:
+        1. 分析任务复杂度 (0-1 分数)
+        2. 如果 > 阈值，使用 LLM 分解
+        3. 生成带依赖的子任务列表
+        4. 返回分解结果
+        """
+```
+
+#### 2. TaskOrchestrator
+
+```python
+class TaskOrchestrator:
+    """任务编排器 - 依赖感知的并行执行"""
+
+    def build_execution_plan(
+        self,
+        query: str,
+        subtasks: list[SubTask]
+    ) -> TaskExecutionPlan:
+        """
+        构建执行计划:
+        1. 使用 NetworkX 构建依赖图
+        2. 计算拓扑层级
+        3. 生成并行执行组
+        """
+
+    async def execute_plan(
+        self,
+        plan: TaskExecutionPlan,
+        agent_map: dict[str, AgentExecutor]
+    ) -> dict[str, str]:
+        """
+        执行计划:
+        1. 按层级顺序执行
+        2. 同层任务并行
+        3. 失败处理和重试
+        """
+```
+
+### 数据模型
+
+```python
+class SubTask(BaseModel):
+    """子任务模型"""
+    id: str                      # 唯一标识
+    title: str                   # 标题
+    description: str             # 描述
+    agent_type: str              # 目标 Agent
+    status: TaskStatus           # 状态
+    priority: TaskPriority       # 优先级
+    dependencies: list[str]      # 依赖任务 ID
+    estimated_duration: int      # 预估时长(秒)
+    result: str | None           # 执行结果
+    error: str | None            # 错误信息
+
+class TaskExecutionPlan(BaseModel):
+    """执行计划"""
+    query: str
+    subtasks: dict[str, SubTask]             # 所有子任务
+    execution_layers: list[list[str]]        # 执行层级
+    total_estimated_duration: int            # 总时长
+    status: TaskStatus
+```
+
+### 执行示例
+
+```
+查询: "CPU 使用率飙升，检查日志并诊断根因"
+
+分解结果:
+┌─────────┬────────────┬─────────────┬──────────────┐
+│  ID     │   Title    │ Agent Type  │ Dependencies │
+├─────────┼────────────┼─────────────┼──────────────┤
+│ task_1  │ 查询CPU指标 │ metrics     │              │
+│ task_2  │ 查询错误日志 │ logs       │              │
+│ task_3  │ 分析根因    │ fault       │ task_1       │
+│ task_4  │ 安全检查    │ security    │              │
+└─────────┴────────────┴─────────────┴──────────────┘
+
+执行层级 (可并行):
+Layer 0: [task_1, task_2, task_4]  ← 并行执行
+Layer 1: [task_3]                  ← 等待 task_1 完成
+```
+
+---
+
+## 数据层
+
+### 数据源集成
+
+| 数据源 | 类型 | 用途 | Agent |
+|--------|------|------|-------|
+| **Prometheus** | 指标 | 系统监控、容量规划 | Metrics |
+| **VictoriaLogs** | 日志 | 日志分析、错误追踪 | Logs |
+| **Vector Store** | 知识 | 文档检索、智能问答 | Knowledge |
+| **OpenTelemetry** | Trace | 分布式追踪、性能分析 | Metrics/Fault |
+
+### Vector Store (知识库)
+
+```python
+class VectorStoreManager:
+    """向量存储管理器 - 支持 RAG 检索"""
+
+    def __init__(self, settings: Settings | None = None):
+        self.embeddings = OpenAIEmbeddings()
+        self.vector_store = Chroma(
+            persist_directory=settings.knowledge.chroma_path,
+            embedding_function=self.embeddings
+        )
+
+    async def query(
+        self,
+        query_text: str,
+        k: int = 4
+    ) -> list[Document]:
+        """相似度检索"""
+```
+
+---
+
+## 事件系统
+
+### EventBus 架构
+
+```python
+class EventBus:
+    """事件总线 - 发布/订阅模式"""
+
+    def subscribe(
+        self,
+        event_type: Type[TEvent],
+        handler: EventHandler[TEvent]
+    ) -> Callable[[], None]:
+        """订阅事件类型"""
+
+    async def publish(self, event: Event) -> None:
+        """发布事件"""
+```
+
+### 任务事件类型
+
+| 事件 | 触发时机 | 用途 |
+|------|----------|------|
+| `TaskDecompositionStartedEvent` | 开始分解 | 记录分析开始 |
+| `TaskDecompositionCompletedEvent` | 分解完成 | 记录子任务数量 |
+| `TaskPlanCreatedEvent` | 计划创建 | 记录执行层级 |
+| `TaskStartedEvent` | 任务开始 | 追踪任务启动 |
+| `TaskCompletedEvent` | 任务完成 | 记录执行结果 |
+| `TaskFailedEvent` | 任务失败 | 记录错误信息 |
+| `TaskLayerStartedEvent` | 层级开始 | 追踪并行组 |
+| `TaskLayerCompletedEvent` | 层级完成 | 统计成功率 |
+| `TaskPlanCompletedEvent` | 计划完成 | 汇总执行统计 |
+
+---
+
+## 配置管理
+
+### 配置层次
+
+```yaml
+# config.yaml
+app_name: "aiops-agent"
+environment: "production"
+log_level: "INFO"
+
+cache:
+  enabled: true
+  default_ttl_sec: 3600
+  max_entries: 2048
+
+metrics:
+  enabled: true
+  collect_latency: true
+  track_success_rate: true
+
+skills:
+  auto_discovery: true
+  sandbox_enabled: true
+  quality_threshold: 0.7
+
+knowledge:
+  chroma_path: "data/chroma"
+  embeddings_model: "text-embedding-ada-002"
+```
+
+### 环境变量覆盖
+
+```bash
+# LLM 配置
+LLM_MODEL=qwen3.5:9b
+ROUTER_LLM_MODEL=qwen3.5:2b
+LITELLM_API_BASE=http://localhost:11434
+
+# 任务分解配置
+TASK_DECOMPOSITION_THRESHOLD=0.3
+TASK_MAX_SUBTASKS=10
+TASK_DECOMPOSITION_TIMEOUT=30
+```
+
+---
+
+## 部署架构
+
+### 推荐部署方案
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Kubernetes 集群                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌───────────────────┐    ┌───────────────────┐                 │
+│  │   AIOps Pod       │    │   Vector DB Pod   │                 │
+│  │  ┌─────────────┐  │    │  ┌─────────────┐  │                 │
+│  │  │  FastAPI    │  │    │  │   Chroma    │  │                 │
+│  │  │   Worker    │  │    │  │             │  │                 │
+│  │  └─────────────┘  │    │  └─────────────┘  │                 │
+│  │  ┌─────────────┐  │    └───────────────────┘                 │
+│  │  │  Redis      │  │                                        │
+│  │  │  (Cache)    │  │    ┌───────────────────┐                 │
+│  │  └─────────────┘  │    │  Monitoring Stack │                 │
+│  └───────────────────┘    │  - Prometheus     │                 │
+│                           │  - VictoriaLogs   │                 │
+│                           │  - Grafana        │                 │
+│                           └───────────────────┘                 │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Docker Compose 开发环境
+
+```yaml
+services:
+  aiops-api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - LITELLM_API_BASE=http://litellm:11434
+    depends_on:
+      - redis
+      - chroma
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main
+    ports:
+      - "11434:11434"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  chroma:
+    image: chromadb/chroma:latest
+    ports:
+      - "8001:8000"
+```
+
+---
+
+## 附录
+
+### A. 状态码参考
+
+| 组件 | 状态 | 说明 |
+|------|------|------|
+| Task | `pending` | 等待执行 |
+| Task | `in_progress` | 执行中 |
+| Task | `completed` | 已完成 |
+| Task | `failed` | 执行失败 |
+| Task | `skipped` | 已跳过 |
+
+### B. 严重程度级别
+
+| 级别 | 描述 | 示例 |
+|------|------|------|
+| `critical` | 系统完全不可用 | 服务宕机、数据丢失 |
+| `high` | 服务严重降级 | 响应超时、错误率>50% |
+| `medium` | 功能异常 | 部分接口失败 |
+| `low` | 信息查询 | 状态检查、文档查询 |
+
+### C. 相关文档
+
+- [API 文档](./api.md)
+- [用户指南](./user_guide.md)
+- [部署指南](./deployment_guide_skills.md)
+- [Agent Skills 设计](./agent_skills_design.md)
+- [架构优化提案](./architecture_optimization_proposals.md)
+- [技能自学习系统设计](./skills_self_learning_system_design_v2.md)
+
+---
+
+> 文档版本: v2.0
+> 最后更新: 2025-03-20
+> 维护者: AIOps 团队
