@@ -33,6 +33,8 @@ from aiops.workflows.skill_middleware import get_skill_post_middleware_chain, ge
 from aiops.core.error_handler import get_logger, log_exception, safe_execute
 from aiops.exceptions import AgentException, ConfigException
 from aiops.core.classification_metrics import get_metrics
+from aiops.core.events import get_event_bus
+from aiops.tasks import get_task_decomposer, get_task_orchestrator, TaskDecompositionResult, TaskExecutionPlan
 
 
 Severity = Literal["low", "medium", "high", "critical"]
@@ -64,6 +66,9 @@ class RouterState(TypedDict):
     skill_execution_plan: dict
     knowledge_context: Optional[str]
     knowledge_base_result: Optional[str]
+    # Task decomposition and orchestration fields
+    task_decomposition: Optional[TaskDecompositionResult]
+    execution_plan: Optional[TaskExecutionPlan]
 
 
 class ClassificationResult(BaseModel):
@@ -606,21 +611,176 @@ def skill_orchestration_node(state: RouterState) -> dict:
     return node(state)
 
 
+# -------------------------------------------------------------------------
+# Task Decomposition and Orchestration Nodes
+# -------------------------------------------------------------------------
+
+async def task_decompose_node(state: RouterState, config) -> dict:
+    """Task decomposition node: Analyzes query complexity and decomposes if complex.
+
+    This node:
+    1. Analyzes query complexity
+    2. If complex (score > threshold), decomposes into subtasks
+    3. Returns decomposition result for conditional routing
+
+    Args:
+        state: RouterState containing the query
+        config: LangGraph runnable config
+
+    Returns:
+        dict with task_decomposition key
+    """
+    decomposer = get_task_decomposer()
+    decomposition_result = await decomposer.decompose(state)
+
+    return {"task_decomposition": decomposition_result}
+
+
+def task_route_dispatch(state: RouterState) -> list[Send]:
+    """Dispatch based on task decomposition result.
+
+    Returns Send objects to route to appropriate nodes:
+    - If complex tasks: route to task_execute
+    - If simple tasks: route to original agents (metrics, logs, etc.)
+
+    Args:
+        state: RouterState with task_decomposition result
+
+    Returns:
+        list of Send objects for routing
+    """
+    decomposition = state.get("task_decomposition")
+
+    # Check if we should use task orchestration
+    if decomposition and decomposition.should_decompose and decomposition.subtasks:
+        # Route to task execution node
+        return [Send("task_execute", state)]
+
+    # Otherwise, use original agent routing based on classifications
+    classifications = state.get("classifications", [])
+
+    if not classifications:
+        # No classifications, route to synthesize directly
+        return []
+
+    # Use original routing logic with critical agents
+    enriched = _ensure_critical_agents(list(classifications), state["query"])
+    return [Send(item["source"], {"query": item["query"]}) for item in enriched]
+
+
+async def task_execute_node(state: RouterState, config) -> dict:
+    """Task execution node: Orchestrates multi-agent task execution.
+
+    This node uses the TaskOrchestrator to:
+    1. Build execution plan from decomposition result
+    2. Execute tasks in topological order (respecting dependencies)
+    3. Run independent tasks in parallel within each layer
+    4. Return aggregated results
+
+    Args:
+        state: RouterState with decomposition result
+        config: LangGraph runnable config
+
+    Returns:
+        dict with results and final_answer keys
+    """
+    decomposition = state.get("task_decomposition")
+    if not decomposition or not decomposition.should_decompose:
+        return {"final_answer": "No tasks to execute."}
+
+    # Build execution plan
+    orchestrator = get_task_orchestrator()
+    plan = orchestrator.build_execution_plan(
+        query=state.get("query", ""),
+        subtasks=decomposition.subtasks,
+    )
+
+    # Build agent map for execution
+    # For now, use empty map - agents will need to be properly integrated later
+    agent_map = {}
+
+    # Execute plan
+    results = await orchestrator.execute_plan(plan, agent_map)
+
+    # Synthesize final answer from results
+    if results:
+        answer = "Task execution completed:\n" + "\n".join(
+            f"- {task_id}: {result[:200]}..." if len(result) > 200 else f"- {task_id}: {result}"
+            for task_id, result in results.items()
+        )
+    else:
+        answer = "Task execution completed with no results."
+
+    return {"results": [{"source": "task_orchestration", "result": answer}], "final_answer": answer}
+
+
+async def task_execute_node(state: RouterState, config) -> dict:
+    """Task execution node: Orchestrates multi-agent task execution.
+
+    This node uses the TaskOrchestrator to:
+    1. Build execution plan from decomposition result
+    2. Execute tasks in topological order (respecting dependencies)
+    3. Run independent tasks in parallel within each layer
+    4. Return aggregated results
+
+    Args:
+        state: RouterState with decomposition result
+        config: LangGraph runnable config
+
+    Returns:
+        dict with results and final_answer keys
+    """
+    decomposition = state.get("task_decomposition")
+    if not decomposition or not decomposition.should_decompose:
+        return {"final_answer": "No tasks to execute."}
+
+    # Build execution plan
+    orchestrator = get_task_orchestrator()
+    plan = orchestrator.build_execution_plan(
+        query=state.get("query", ""),
+        subtasks=decomposition.subtasks,
+    )
+
+    # Build agent map for execution
+    # For now, use empty map - agents will need to be properly integrated later
+    agent_map = {}
+
+    # Execute plan
+    results = await orchestrator.execute_plan(plan, agent_map)
+
+    # Synthesize final answer from results
+    if results:
+        answer = "Task execution completed:\n" + "\n".join(
+            f"- {task_id}: {result[:200]}..." if len(result) > 200 else f"- {task_id}: {result}"
+            for task_id, result in results.items()
+        )
+    else:
+        answer = "Task execution completed with no results."
+
+    return {"results": [{"source": "task_orchestration", "result": answer}], "final_answer": answer}
+
+
 def build_workflow(llm, router_llm, settings=None):
     """
     构建 LangGraph 工作流图。
-    
+
     定义节点(Nodes)和边(Edges)，编译成可执行的应用。
     流程结构:
-    1. classify: 初始分类
-    2. 并行执行: metrics, logs, fault, security, skill_orchestrate
-    3. synthesize: 汇总所有结果
+    1. skill_middleware_pre: Pre-processing middleware
+    2. classify: 初始分类
+    3. task_decompose: 任务复杂度分析和分解
+    4. task_route_dispatch: 根据分解结果分发路由
+       - 复杂任务 -> task_execute -> synthesize
+       - 简单任务 -> metrics/logs/fault/security/knowledge_base -> synthesize
+    5. skill_orchestrate: 并行技能编排
+    6. synthesize: 汇总所有结果
+    7. skill_middleware_post: Post-processing middleware
     """
     metrics_agent = build_metrics_agent().build(llm)
     logs_agent = build_logs_agent().build(llm)
     fault_agent = build_fault_agent().build(llm)
     security_agent = build_security_agent().build(llm)
-    
+
     vector_store = VectorStoreManager(settings=settings)
     knowledge_agent = KnowledgeAgent(vector_store).build(llm)
 
@@ -628,6 +788,8 @@ def build_workflow(llm, router_llm, settings=None):
         StateGraph(RouterState)
         .add_node("skill_middleware_pre", make_skill_middleware_pre_node())
         .add_node("classify", lambda state: classify_query(state, router_llm))
+        .add_node("task_decompose", task_decompose_node)
+        .add_node("task_execute", task_execute_node)
         .add_node("skill_orchestrate", make_skill_orchestration_node(settings))
         .add_node("metrics", make_query_node(metrics_agent, "metrics"))
         .add_node("logs", make_query_node(logs_agent, "logs"))
@@ -638,14 +800,22 @@ def build_workflow(llm, router_llm, settings=None):
         .add_node("skill_middleware_post", lambda state: {})
         .add_edge(START, "skill_middleware_pre")
         .add_edge("skill_middleware_pre", "classify")
-        .add_conditional_edges("classify", route_to_agents, ["metrics", "logs", "fault", "security", "knowledge_base"])
-        .add_edge("classify", "skill_orchestrate")
+        .add_edge("classify", "task_decompose")
+        # Conditional routing: either to task_execute or to original agents
+        .add_conditional_edges("task_decompose", task_route_dispatch, [
+            "task_execute", "metrics", "logs", "fault", "security", "knowledge_base"
+        ])
+        # All paths converge to synthesize
+        .add_edge("task_execute", "synthesize")
         .add_edge("metrics", "synthesize")
         .add_edge("logs", "synthesize")
         .add_edge("fault", "synthesize")
         .add_edge("security", "synthesize")
         .add_edge("knowledge_base", "synthesize")
+        # Skill orchestrate runs in parallel
+        .add_edge("classify", "skill_orchestrate")
         .add_edge("skill_orchestrate", "synthesize")
+        # Final steps
         .add_edge("synthesize", "skill_middleware_post")
         .add_edge("skill_middleware_post", END)
     )
